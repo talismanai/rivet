@@ -190,6 +190,7 @@ export const OverlayTabs: FC = () => {
   };
 
   const communityEnabled = useFeatureFlag('community');
+  const companyEnabled = useFeatureFlag('company');
 
   return (
     <div css={styles} className={clsx({ 'sidebar-open': sidebarOpen })}>
@@ -254,6 +255,21 @@ export const OverlayTabs: FC = () => {
               }}
             >
               Community
+            </button>
+          </div>
+        )}
+
+        {companyEnabled && (
+          <div className={clsx('menu-item company', { active: openOverlay === 'company' })}>
+            <button
+              className="dropdown-item"
+              onMouseDown={(e) => {
+                if (e.button === 0) {
+                  setOpenOverlay((s) => (s === 'company' ? undefined : 'company'));
+                }
+              }}
+            >
+              Company
             </button>
           </div>
         )}

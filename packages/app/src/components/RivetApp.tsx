@@ -30,6 +30,7 @@ import { ProjectSelector } from './ProjectSelector';
 import { NewProjectModalRenderer } from './NewProjectModal';
 import { useWindowTitle } from '../hooks/useWindowTitle';
 import { CommunityOverlayRenderer } from './community/CommunityOverlay';
+import { CompanyOverlayRenderer } from './company/CompanyOverlay';
 import { HelpModal } from './HelpModal';
 import { openedProjectsSortedIdsState } from '../state/savedGraphs';
 import { NoProject } from './NoProject';
@@ -100,6 +101,7 @@ export const RivetApp: FC = () => {
           <UpdateModalRenderer />
           <NewProjectModalRenderer />
           <CommunityOverlayRenderer />
+          <CompanyOverlayRenderer />
         </>
       )}
       <HelpModal />

@@ -6,7 +6,14 @@ const { storage } = createHybridStorage('ui');
 
 export const debuggerPanelOpenState = atom<boolean>(false);
 
-export type OverlayKey = 'promptDesigner' | 'trivet' | 'chatViewer' | 'dataStudio' | 'plugins' | 'community';
+export type OverlayKey =
+  | 'promptDesigner'
+  | 'trivet'
+  | 'chatViewer'
+  | 'dataStudio'
+  | 'plugins'
+  | 'community'
+  | 'company';
 
 export const overlayOpenState = atom<OverlayKey | undefined>(undefined);
 
