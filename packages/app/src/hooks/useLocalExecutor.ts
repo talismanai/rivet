@@ -14,6 +14,8 @@ import { produce } from 'immer';
 import { useRef } from 'react';
 import { toast } from 'react-toastify';
 import { TauriNativeApi } from '../model/native/TauriNativeApi';
+import { requestHttpAuthentication } from '../utils/httpAuthentication';
+import { desktopHttpRequest } from '../utils/desktopHttpRequest';
 import { useStableCallback } from './useStableCallback';
 import { useSaveCurrentGraph } from './useSaveCurrentGraph';
 import { useCurrentExecution } from './useCurrentExecution';
@@ -22,7 +24,7 @@ import { loadedProjectState, projectContextState, projectDataState, projectState
 import { recordExecutionsState, settingsState } from '../state/settings';
 import { graphState } from '../state/graph';
 import { lastRecordingState, loadedRecordingState } from '../state/execution';
-import { fillMissingSettingsFromEnvironmentVariables } from '../utils/tauri';
+import { fillMissingSettingsFromEnvironmentVariables, isInTauri } from '../utils/tauri';
 import { trivetState } from '../state/trivet';
 import { runTrivet } from '@ironclad/trivet';
 import { audioProvider, datasetProvider } from '../utils/globals';
@@ -157,6 +159,7 @@ export function useLocalExecutor() {
                 globalRivetNodeRegistry.getPlugins(),
               ),
               nativeApi: new TauriNativeApi(),
+              ...(isInTauri() ? { requestHttpAuthentication, httpRequest: desktopHttpRequest } : {}),
               datasetProvider,
               audioProvider,
               projectPath: loadedProject.path ?? undefined,
@@ -221,6 +224,7 @@ export function useLocalExecutor() {
                   globalRivetNodeRegistry.getPlugins(),
                 ),
                 nativeApi: new TauriNativeApi(),
+                ...(isInTauri() ? { requestHttpAuthentication, httpRequest: desktopHttpRequest } : {}),
                 datasetProvider,
                 audioProvider,
               },

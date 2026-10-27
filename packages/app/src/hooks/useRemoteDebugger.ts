@@ -5,6 +5,11 @@ import { useRef, useState } from 'react';
 import { set } from 'lodash-es';
 import { match } from 'ts-pattern';
 import { datasetProvider } from '../utils/globals';
+import { type HttpAuthenticationRequest } from '@ironclad/rivet-core';
+import { toast } from 'react-toastify';
+import { requestHttpAuthentication } from '../utils/httpAuthentication';
+import { RemoteHttpAuthentication } from '../utils/remoteHttpAuthentication';
+import { isInTauri } from '../utils/tauri';
 
 let currentDebuggerMessageHandler: ((message: string, data: unknown) => void) | null = null;
 
@@ -29,6 +34,20 @@ export function useRemoteDebugger(options: { onConnect?: () => void; onDisconnec
       url = `ws://localhost:21888`;
     }
     const socket = new WebSocket(url);
+    const authentication = new RemoteHttpAuthentication(
+      (request, signal) => {
+        toast.info(
+          'Complete Google sign-in in the dedicated Chrome window. Rivet will capture your platform token and resume the request.',
+        );
+        return requestHttpAuthentication(request, signal);
+      },
+      (requestId, result) => {
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ type: 'http-authentication-response', data: { requestId, result } }));
+        }
+      },
+      (error) => toast.error(String(error)),
+    );
     onConnectLatest.current?.();
 
     setRemoteDebuggerState((prevState) => ({
@@ -48,6 +67,7 @@ export function useRemoteDebugger(options: { onConnect?: () => void; onDisconnec
     };
 
     socket.onclose = () => {
+      authentication.dispose();
       if (manuallyDisconnecting) {
         setRemoteDebuggerState((prevState) => ({
           ...prevState,
@@ -74,7 +94,14 @@ export function useRemoteDebugger(options: { onConnect?: () => void; onDisconnec
     socket.onmessage = (event) => {
       const { message, data } = JSON.parse(event.data);
 
-      if (message === 'graph-upload-allowed') {
+      if (message === 'http-authentication-supported') {
+        if (isInTauri()) socket.send(JSON.stringify({ type: 'http-authentication-supported', data: {} }));
+      } else if (message === 'http-authentication') {
+        const { requestId, request } = data as { requestId: string; request: HttpAuthenticationRequest };
+        void authentication.start(requestId, request);
+      } else if (message === 'http-authentication-cancel') {
+        authentication.cancel((data as { requestId: string }).requestId);
+      } else if (message === 'graph-upload-allowed') {
         console.log('Graph uploading is allowed.');
         setRemoteDebuggerState((prevState) => ({
           ...prevState,

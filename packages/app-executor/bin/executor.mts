@@ -16,6 +16,7 @@ import { match } from 'ts-pattern';
 import { join } from 'node:path';
 import { access, readFile } from 'node:fs/promises';
 import { platform, homedir } from 'node:os';
+import { runOAuthLogin } from './oauthLogin.mjs';
 
 const datasetProvider = new DebuggerDatasetProvider();
 
@@ -35,7 +36,13 @@ function getAppDataLocalPath() {
     });
 }
 
-const { port } = yargs(hideBin(process.argv))
+const { port, oauthLogin } = yargs(hideBin(process.argv))
+  .option('oauth-login', {
+    alias: 'oauthLogin',
+    type: 'boolean',
+    default: false,
+    description: 'Run one isolated Chrome OAuth sign-in.',
+  })
   .option('port', {
     alias: 'p',
     type: 'number',
@@ -44,7 +51,7 @@ const { port } = yargs(hideBin(process.argv))
   })
   .parseSync();
 
-const rivetDebugger = startDebuggerServer({
+const debuggerOptions: NonNullable<Parameters<typeof startDebuggerServer>[0]> = {
   port,
   allowGraphUpload: true,
   datasetProvider,
@@ -159,10 +166,15 @@ const rivetDebugger = startDebuggerServer({
       throw err;
     }
   },
-});
+};
 
-process.on('SIGTERM', () => {
-  rivetDebugger.webSocketServer.close();
-});
+const rivetDebugger = oauthLogin ? undefined : startDebuggerServer(debuggerOptions);
 
-console.log(`Node.js executor started on port ${port}.`);
+if (oauthLogin) {
+  runOAuthLogin();
+} else {
+  process.on('SIGTERM', () => {
+    rivetDebugger?.webSocketServer.close();
+  });
+  console.log(`Node.js executor started on port ${port}.`);
+}

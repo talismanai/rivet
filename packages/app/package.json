@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "tauri dev",
     "start": "vite",
+    "test": "tsx --test test/*.test.ts",
     "build": "tsc && vite build",
     "release": "tsx scripts/release.ts",
     "context": "echo \"$(cat context.txt && ts-node tree.ts)\" | pbcopy && echo \"Copied to clipboard\"",

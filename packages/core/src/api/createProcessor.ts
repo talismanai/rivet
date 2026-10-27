@@ -43,6 +43,8 @@ export type RunGraphOptions = {
   registry?: NodeRegistration<any, any>;
   includeTrace?: boolean;
   getChatNodeEndpoint?: ProcessContext['getChatNodeEndpoint'];
+  requestHttpAuthentication?: ProcessContext['requestHttpAuthentication'];
+  httpRequest?: ProcessContext['httpRequest'];
   tokenizer?: Tokenizer;
   codeRunner?: CodeRunner;
   projectPath?: string;
@@ -176,6 +178,8 @@ export function coreCreateProcessor(project: Project, options: RunGraphOptions) 
             throttleChatNode: options.throttleChatNode ?? 100,
           } satisfies Required<Settings>,
           getChatNodeEndpoint: options.getChatNodeEndpoint,
+          requestHttpAuthentication: options.requestHttpAuthentication,
+          httpRequest: options.httpRequest,
         },
         resolvedInputs,
         resolvedContextValues,

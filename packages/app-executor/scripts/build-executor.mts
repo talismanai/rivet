@@ -1,5 +1,5 @@
-import { cp } from 'node:fs/promises';
-import { execaCommand } from 'execa';
+import { mkdir } from 'node:fs/promises';
+import { execa } from 'execa';
 import chalk from 'chalk';
 import * as esbuild from 'esbuild';
 import { resolve } from 'node:path';
@@ -24,6 +24,8 @@ await esbuild.build({
   platform: 'node',
   outfile: './bin/executor-bundle.cjs',
   format: 'cjs',
+  // Preserve createRequire's module location when compiling ESM sources into the CommonJS sidecar.
+  define: { 'import.meta.url': '__filename' },
   target: 'node16',
   external: [],
   plugins: [resolveRivet],
@@ -38,59 +40,43 @@ if (platform !== 'darwin' && platform !== 'linux' && platform !== 'win32') {
   process.exit(1);
 }
 
-let target = {
-  darwin: 'node18-macos-x64',
-  linux: 'node18-linux-x64',
-  win32: 'node18-win-x64',
-}[platform];
+// Build each architecture explicitly: copying an Intel executable to an ARM filename
+// prevents the sidecar from launching on Apple Silicon without Rosetta.
+const targets =
+  platform === 'darwin'
+    ? [
+        { pkg: 'node18-macos-x64', file: 'app-executor-x86_64-apple-darwin' },
+        { pkg: 'node18-macos-arm64', file: 'app-executor-aarch64-apple-darwin' },
+      ]
+    : platform === 'win32'
+      ? [{ pkg: 'node18-win-x64', file: 'app-executor-x86_64-pc-windows-msvc.exe' }]
+      : process.arch === 'arm64'
+        ? [{ pkg: 'node18-linux-arm64', file: 'app-executor-aarch64-unknown-linux-gnu' }]
+        : [{ pkg: 'node18-linux-x64', file: 'app-executor-x86_64-unknown-linux-gnu' }];
 
-if (platform === 'linux' && process.arch === 'arm64') {
-  target = 'node18-linux-arm64';
-}
-
-await execaCommand(
-  `yarn pkg . --out-path dist --no-bytecode --options experimental-network-imports --targets ${target}`,
-  {
-    stdio: 'inherit',
-  },
-);
-
-const platformParams = {
-  darwin: {
-    from: 'dist/rivet-app-executor',
-    to: [
-      'dist/app-executor-x86_64-apple-darwin',
-      'dist/app-executor-aarch64-apple-darwin',
-      'dist/app-executor-universal-apple-darwin',
+await mkdir('dist', { recursive: true });
+for (const target of targets) {
+  await execa(
+    'yarn',
+    [
+      'pkg',
+      '.',
+      '--output',
+      `dist/${target.file}`,
+      '--no-bytecode',
+      '--options',
+      'experimental-network-imports',
+      '--targets',
+      target.pkg,
     ],
-  },
-  linux: {
-    from: 'dist/rivet-app-executor',
-    to: undefined,
-  },
-  win32: {
-    from: 'dist/rivet-app-executor.exe',
-    to: ['dist/app-executor-x86_64-pc-windows-msvc.exe'],
-  },
-}[platform];
-
-const sourceFrom = platformParams.from;
-let to = platformParams.to;
-
-const { stdout } = await execaCommand('rustc -Vv');
-const host = stdout
-  .split('\n')
-  .find((line) => line.startsWith('host:'))!
-  .split(' ')[1];
-
-// Copy the file
-
-if (to === undefined) {
-  to = [`dist/app-executor-${host}`];
+    { stdio: 'inherit' },
+  );
+  console.log(`Built ${chalk.cyan(target.file)} for ${target.pkg}`);
 }
 
-for (const toPath of to) {
-  await cp(sourceFrom, toPath);
+if (platform === 'darwin') {
+  const universal = 'dist/app-executor-universal-apple-darwin';
+  await execa('lipo', ['-create', ...targets.map((target) => `dist/${target.file}`), '-output', universal]);
+  await execa('codesign', ['--force', '--sign', '-', universal]);
+  console.log(`Built ${chalk.cyan(universal)} with Intel and Apple Silicon architectures`);
 }
-
-console.log(`Copied ${chalk.cyan(sourceFrom)} to ${chalk.cyan(to.join(', '))} for tauri sidecar`);

@@ -93,6 +93,55 @@ The HTTP call node only has inputs when the [Editor Settings](#editor-settings) 
 
 ![HTTP Call Node Example 2](./assets/http-call-node-example-02.png)
 
+## Interactive authentication
+
+Rivet desktop can authenticate through Google using a dedicated Chrome/Chromium window and capture the JWT returned by your platform. Your platform does not need to change its callback implementation.
+
+Configure these fields on the HTTP Call node:
+
+- **OAuth login URL**: the page to open after HTTP 401 or 403. Both statuses use the same authentication and Bearer-token retry flow. Without a configured URL or a response `Location`, the error remains a normal response; Rivet does not navigate to the protected API as a login page.
+- **OAuth callback URL**: the platform endpoint returning the token JSON. If omitted, Rivet reads `redirect_uri` from the login/authorization URL. Match the exact callback origin and path; OAuth `code` and `state` query parameters may vary.
+
+For example, a login URL like `https://auth.example.com/login?response_type=code&client_id=CLIENT_ID&redirect_uri=https%3A%2F%2Fapi.example.com%2Fapi%2Fv1%2Faccess_tokens%2Fcallback&identity_provider=Google` uses `https://api.example.com/api/v1/access_tokens/callback` as its callback.
+
+HTTP 302 responses pointing to recognizable OAuth authorization pages use their `Location` URL. Rivet inspects desktop redirects before following them, so provider CORS restrictions do not hide the login redirect.
+
+Complete sign-in in the Chrome window. Rivet reads only the configured top-level callback response, expecting:
+
+```json
+{
+  "data": {
+    "access_token": "<jwt>",
+    "expires_in": 3600,
+    "user": { "email": "<email>" }
+  }
+}
+```
+
+Rivet extracts `data.access_token`, closes the dedicated browser, and retries the original method, URL, headers, and body once with `Authorization: Bearer <jwt>`. This works with both the desktop browser executor and Node executor. A second authentication failure does not open another window. Ordinary cross-origin redirects strip the Authorization header.
+
+Tokens are reused in memory for matching API origin and login/callback settings during the graph execution, until their supplied `expires_in` lifetime ends or they are rejected. Without a supplied lifetime, tokens are reused only for the current execution, until rejected. Concurrent requests in the same execution share one login. Tokens and callback user details are not saved to the project. Closing the login window cancels authentication and preserves the original response. Aborting execution cancels the helper and browser.
+
+Chrome/Chromium must be installed. Set `RIVET_CHROME_PATH` to an absolute executable path if auto-detection cannot find it. Rivet uses a temporary profile, separate from your normal browser profile, and a private debugging pipe. The temporary profile is removed after sign-in, cancellation, or failure. Sign-in times out after ten minutes.
+
+If the platform callback fails or returns invalid JSON/token data, Rivet reports the error and leaves Chrome open with the original response for inspection. Close that Chrome window when finished to clean up the helper and temporary profile. Callback bodies and JWTs are not printed to logs.
+
+Rebuild Rivet's bundled executor sidecar after updating this code (`yarn workspace @ironclad/rivet-app-executor build`); the desktop app launches its new `--oauth-login` mode for both executors. Google login runs in a full browser because Google prohibits embedded user agents.
+
+The web UI outside Tauri keeps non-interactive Fetch behavior. Embedded hosts can provide `requestHttpAuthentication` in process context or processor options and return `{ accessToken, expiresIn? }`, or `false` on cancellation. Hosts can also provide `httpRequest`, a transport supporting manual redirects. The protected API remains responsible for validating the JWT.
+
+### Official login pages and Authorization headers
+
+A login page such as `https://dev.admin.getenter.ai/login` can be used without a JSON callback. Leave **OAuth callback URL** empty and use a login URL without `redirect_uri`. Rivet watches requests made by that browser tab and captures a Bearer JWT only from a request to the same origin as the protected API, after a successful response. Google requests, unrelated origins, expired tokens, and unsuccessful API responses are ignored. If necessary, navigate within the signed-in app to a page that calls the configured API. The JWT's `exp` claim controls its cached lifetime when available.
+
+The Enter plugin uses this header-capture flow with **Settings → Enter → OAuth login URL**, including for all requests previously authenticated with `blackPearlApiKey`. It does not require **OAuth callback URL**.
+
+### Using authentication from plugins
+
+Plugins can call the injected `rivet.fetchWithHttpAuthentication(url, init, context, options)` helper with `loginUrl` and optional `callbackUrl`. Set `tokenSource: 'authorization-header'` for official login pages, or `tokenSource: 'callback'` for JSON callbacks. Without an explicit source, a callback URL or `redirect_uri` selects JSON capture; otherwise header capture is used. Set `preferCachedToken: true` when a cached OAuth token should replace the plugin's configured API-key Authorization header on subsequent requests. The default preserves explicit Authorization headers. Set `authenticateBeforeRequest: true` to sign in before sending the request when there is no reusable session; cancellation or a missing interactive host prevents the request.
+
+The updated Enter plugin uses this helper for all Black Pearl API requests from **Deploy Project**, **Data Fetcher V1**, **Fetch Input**, **Talisman LLM**, and **Intelligence**. Configure its **OAuth login URL** under **Settings → Enter**. When the API key is missing, empty, or whitespace-only and no JWT is available, it signs in before making the request. Nodes share the JWT during that graph execution. Both the plugin and Rivet must include the authentication changes.
+
 ## Error Handling
 
 The HTTP Call Node will error if the HTTP request fails for any reason, such as a network error or if the server returns an error status code. If the `Error on non-200 status code` setting is enabled, the node will also error if the status code of the HTTP response is not 200.
