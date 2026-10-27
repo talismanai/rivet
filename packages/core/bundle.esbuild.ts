@@ -25,6 +25,7 @@ const options: esbuild.BuildOptions = {
   platform: 'node',
   outfile: 'dist/cjs/bundle.cjs',
   format: 'cjs',
+  define: { 'import.meta.url': '__filename' },
   target: 'node16',
   packages: 'external',
   sourcemap: true,

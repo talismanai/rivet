@@ -32,7 +32,8 @@
         "scope": [
           {
             "name": "../../app-executor/dist/app-executor",
-            "sidecar": true
+            "sidecar": true,
+            "args": true
           },
           {
             "name": "npm",
@@ -62,7 +63,7 @@
       },
       "http": {
         "all": true,
-        "scope": ["https://*"]
+        "scope": ["http://*", "https://*"]
       }
     },
     "bundle": {

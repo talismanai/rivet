@@ -25,6 +25,15 @@ export type ProcessContext = {
   settings: Settings;
   nativeApi?: NativeApi;
 
+  /** Signs in and returns a platform access token, or false if authentication was cancelled. */
+  requestHttpAuthentication?: (
+    request: HttpAuthenticationRequest,
+    signal: AbortSignal,
+  ) => Promise<HttpAuthenticationResult>;
+
+  /** Optional HTTP transport that exposes manual redirects, including in desktop browser executors. */
+  httpRequest?: (url: string, init: RequestInit) => Promise<Response>;
+
   /** Sets the dataset provider to be used for all dataset node calls. */
   datasetProvider?: DatasetProvider;
 
@@ -55,6 +64,18 @@ export type ProcessContext = {
     configuredModel: string,
   ) => ChatNodeEndpointInfo | Promise<ChatNodeEndpointInfo>;
 };
+
+export type HttpAuthenticationRequest = {
+  requestUrl: string;
+  authenticationUrl: string;
+  /** HTTP challenge status, or 0 for sign-in before the first request. */
+  status: number;
+  callbackUrl?: string;
+  tokenSource?: 'callback' | 'authorization-header';
+};
+
+export type HttpAuthenticationToken = { accessToken: string; expiresIn?: number };
+export type HttpAuthenticationResult = HttpAuthenticationToken | false;
 
 export type ChatNodeEndpointInfo = {
   endpoint: string;

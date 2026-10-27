@@ -11,6 +11,10 @@ import {
   type DataId,
   type DataValue,
   type Outputs,
+  type HttpAuthenticationRequest,
+  type HttpAuthenticationResult,
+  isHttpAuthenticationToken,
+  newId,
 } from '@ironclad/rivet-core';
 import { match } from 'ts-pattern';
 import Emittery from 'emittery';
@@ -26,6 +30,11 @@ export interface RivetDebuggerServer {
 
   attach(processor: GraphProcessor): void;
   detach(processor: GraphProcessor): void;
+  requestHttpAuthentication?: (
+    processor: GraphProcessor,
+    request: HttpAuthenticationRequest,
+    signal: AbortSignal,
+  ) => Promise<HttpAuthenticationResult>;
 }
 
 export interface DebuggerEvents {
@@ -69,6 +78,11 @@ export function startDebuggerServer(
   const emitter = new Emittery<DebuggerEvents>();
 
   const attachedProcessors: GraphProcessor[] = [];
+  const pendingAuthentication = new Map<
+    string,
+    { client: WebSocket; finish: (result?: HttpAuthenticationResult) => void }
+  >();
+  const authenticationClients = new WeakSet<WebSocket>();
 
   server.on('connection', (socket) => {
     if (options.datasetProvider) {
@@ -133,6 +147,14 @@ export function startDebuggerServer(
           .with({ type: 'datasets:response' }, async () => {
             options.datasetProvider?.handleResponse(message.type, message.data as any);
           })
+          .with({ type: 'http-authentication-response' }, async () => {
+            const { requestId, result } = message.data as { requestId: string; result?: unknown };
+            const pending = pendingAuthentication.get(requestId);
+            if (pending?.client === socket) pending.finish(isHttpAuthenticationToken(result) ? result : false);
+          })
+          .with({ type: 'http-authentication-supported' }, async () => {
+            authenticationClients.add(socket);
+          })
           .otherwise(async () => {
             const processors = options.getProcessorsForClient?.(socket, attachedProcessors) ?? attachedProcessors;
 
@@ -175,6 +197,12 @@ export function startDebuggerServer(
     socket.on('message', (data) => {
       void handleMessage(data);
     });
+    socket.on('close', () => {
+      for (const pending of pendingAuthentication.values()) {
+        if (pending.client === socket) pending.finish();
+      }
+    });
+    socket.send(JSON.stringify({ message: 'http-authentication-supported', data: {} }));
 
     if (options.allowGraphUpload) {
       socket.send(
@@ -191,6 +219,34 @@ export function startDebuggerServer(
     off: emitter.off.bind(emitter),
 
     webSocketServer: server,
+
+    async requestHttpAuthentication(processor, request, signal) {
+      signal.throwIfAborted();
+      const clients = options.getClientsForProcessor?.(processor, [...server.clients]) ?? [...server.clients];
+      const client = clients.find(
+        (candidate) => candidate.readyState === WebSocket.OPEN && authenticationClients.has(candidate),
+      );
+      if (!client) return false;
+      const requestId = newId();
+      const result = await new Promise<HttpAuthenticationResult>((resolve) => {
+        const finish = (token: HttpAuthenticationResult = false) => {
+          pendingAuthentication.delete(requestId);
+          signal.removeEventListener('abort', abort);
+          resolve(token);
+        };
+        const abort = () => {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(JSON.stringify({ message: 'http-authentication-cancel', data: { requestId } }));
+          }
+          finish();
+        };
+        pendingAuthentication.set(requestId, { client, finish });
+        signal.addEventListener('abort', abort, { once: true });
+        client.send(JSON.stringify({ message: 'http-authentication', data: { requestId, request } }));
+      });
+      signal.throwIfAborted();
+      return result;
+    },
 
     /** Given an event on a processor, sends that processor's events to the correct debugger clients (allows routing debugger). */
     broadcast(procesor: GraphProcessor, message: string, data: unknown) {

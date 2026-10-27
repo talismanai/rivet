@@ -12,6 +12,7 @@ import { type Inputs, type Outputs } from '../GraphProcessor.js';
 import { type EditorDefinition, type InternalProcessContext } from '../../index.js';
 import { coerceType, dedent, getInputOrData } from '../../utils/index.js';
 import { getError } from '../../utils/errors.js';
+import { fetchWithHttpAuthentication } from '../../utils/httpAuthentication.js';
 
 export type HttpCallNode = ChartNode<'httpCall', HttpCallNodeData>;
 
@@ -21,6 +22,9 @@ export type HttpCallNodeData = {
 
   url: string;
   useUrlInput?: boolean;
+
+  authenticationUrl?: string;
+  authenticationCallbackUrl?: string;
 
   headers: string;
   useHeadersInput?: boolean;
@@ -154,6 +158,19 @@ export class HttpCallNodeImpl extends NodeImpl<HttpCallNode> {
         useInputToggleDataKey: 'useUrlInput',
       },
       {
+        type: 'string',
+        label: 'OAuth login URL',
+        dataKey: 'authenticationUrl',
+        helperMessage: 'Login URL to open on HTTP 401 or 403. A 302 uses its OAuth redirect URL.',
+      },
+      {
+        type: 'string',
+        label: 'OAuth callback URL',
+        dataKey: 'authenticationCallbackUrl',
+        helperMessage:
+          'Platform endpoint returning data.access_token. For an official login page without redirect_uri, leave empty to capture Authorization headers sent to the request origin.',
+      },
+      {
         type: 'code',
         label: 'Headers',
         dataKey: 'headers',
@@ -248,13 +265,18 @@ export class HttpCallNodeImpl extends NodeImpl<HttpCallNode> {
     }
 
     try {
-      const response = await fetch(url, {
-        method,
-        headers,
-        body,
-        signal: context.signal,
-        mode: 'cors',
-      });
+      const response = await fetchWithHttpAuthentication(
+        url,
+        {
+          method,
+          headers,
+          body,
+          signal: context.signal,
+          mode: 'cors',
+        },
+        context,
+        { loginUrl: this.data.authenticationUrl, callbackUrl: this.data.authenticationCallbackUrl },
+      );
 
       const output: Outputs = {
         ['statusCode' as PortId]: {
