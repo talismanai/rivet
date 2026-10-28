@@ -9,13 +9,14 @@ import type { Command, Child } from '@tauri-apps/api/shell';
 export function runOAuthSidecar(
   request: HttpAuthenticationRequest,
   signal: AbortSignal,
-  command: Pick<Command, 'stdout' | 'on' | 'spawn'>,
+  command: Pick<Command, 'stdout' | 'stderr' | 'on' | 'spawn'>,
 ): Promise<HttpAuthenticationResult> {
   signal.throwIfAborted();
   return new Promise((resolve, reject) => {
     let child: Child | undefined;
     let settled = false;
     let closed = false;
+    let invalidPkgPayload = false;
     let killTimer: ReturnType<typeof setTimeout> | undefined;
     const finish = (result: HttpAuthenticationResult, error?: Error, keepBrowserOpen = false) => {
       if (settled) return;
@@ -47,10 +48,28 @@ export function runOAuthSidecar(
         finish(false, new Error('OAuth helper returned an invalid response'));
       }
     });
-    command.on('close', ({ code }) => {
+    command.stderr.on('data', (line) => {
+      // Classify a known startup failure without retaining or exposing arbitrary stderr or credentials.
+      if (!settled && /pkg\/prelude\/bootstrap|node:internal\/bootstrap\/pkg/.test(line.slice(0, 4096))) {
+        invalidPkgPayload = true;
+      }
+    });
+    command.on('close', ({ code, signal: exitSignal }) => {
       closed = true;
       if (killTimer) clearTimeout(killTimer);
-      finish(false, code === 0 ? undefined : new Error('OAuth browser helper exited unexpectedly'));
+      const details = [
+        typeof code === 'number' ? `exit code ${code}` : undefined,
+        typeof exitSignal === 'number' ? `signal ${exitSignal}` : undefined,
+      ].filter(Boolean);
+      const hint = invalidPkgPayload
+        ? ' The packaged executor could not load its embedded Node.js payload. Rebuild the sidecar and installer.'
+        : ' The helper did not return an authentication result. Check the installed executor sidecar.';
+      finish(
+        false,
+        new Error(
+          `OAuth browser helper exited unexpectedly${details.length ? ` (${details.join(', ')})` : ''}.${hint}`,
+        ),
+      );
     });
     command.on('error', () => finish(false, new Error('OAuth browser helper failed')));
     signal.addEventListener('abort', abort, { once: true });
