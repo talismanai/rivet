@@ -9,6 +9,7 @@
     "build": "tsx scripts/build-executor.mts",
     "dev": "tsx watch --inspect=9228 --experimental-network-imports bin/executor.mts",
     "start": "yarn build && node --experimental-network-imports bin/executor-bundle.cjs",
+    "test": "tsx --test test/*.test.ts",
     "lint": "eslint ."
   },
   "devDependencies": {

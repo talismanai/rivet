@@ -13,15 +13,16 @@ const request = {
 function setup() {
   const events = new EventEmitter();
   const stdout = new EventEmitter();
+  const stderr = new EventEmitter();
   const child = { pid: 1, write: mock.fn(async (_data: string) => {}), kill: mock.fn(async () => {}) };
-  const command = Object.assign(events, { stdout, spawn: async () => child });
+  const command = Object.assign(events, { stdout, stderr, spawn: async () => child });
   const controller = new AbortController();
   const pending = runOAuthSidecar(
     request,
     controller.signal,
-    command as unknown as Pick<Command, 'stdout' | 'on' | 'spawn'>,
+    command as unknown as Pick<Command, 'stdout' | 'stderr' | 'on' | 'spawn'>,
   );
-  return { events, stdout, child, controller, pending };
+  return { events, stdout, stderr, child, controller, pending };
 }
 
 it('returns the private helper JWT and passes configuration over stdin', async () => {
@@ -69,4 +70,33 @@ it('reports a callback error without cancelling the browser left open for inspec
   assert.equal(child.write.mock.callCount(), 1);
   assert.equal(child.kill.mock.callCount(), 0);
   events.emit('close', { code: 0 });
+});
+
+it('identifies invalid pkg startup offsets without exposing stderr contents', async () => {
+  const { stderr, events, pending } = setup();
+  stderr.emit('data', 'pkg/prelude/bootstrap.js:1 secret.jwt.token');
+  events.emit('close', { code: 1, signal: null });
+  await assert.rejects(
+    pending,
+    (error: Error) =>
+      error.message.includes('exit code 1') &&
+      error.message.includes('could not load its embedded Node.js payload') &&
+      !error.message.includes('secret'),
+  );
+});
+
+it('reports termination signals without printing arbitrary runtime output', async () => {
+  const { stderr, events, pending } = setup();
+  stderr.emit('data', 'Authorization: Bearer secret.jwt.token');
+  events.emit('close', { code: null, signal: 9 });
+  await assert.rejects(
+    pending,
+    (error: Error) => error.message.includes('signal 9') && !error.message.includes('secret'),
+  );
+});
+
+it('requires a protocol result even when the helper exits successfully', async () => {
+  const { events, pending } = setup();
+  events.emit('close', { code: 0, signal: null });
+  await assert.rejects(pending, /exit code 0/);
 });

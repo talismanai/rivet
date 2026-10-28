@@ -12,7 +12,7 @@
     "noEmit": true,
     "importsNotUsedAsValues": "remove"
   },
-  "include": ["src", "bin", "scripts"],
+  "include": ["src", "bin", "scripts", "test"],
   "ts-node": {
     "swc": true,
     "compilerOptions": {

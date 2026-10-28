@@ -1,8 +1,10 @@
-import { mkdir } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { execa } from 'execa';
 import chalk from 'chalk';
 import * as esbuild from 'esbuild';
 import { resolve } from 'node:path';
+import { relocateUniversalPkg } from './relocate-universal-pkg.mjs';
 
 const resolveRivet: esbuild.Plugin = {
   name: 'resolve-rivet',
@@ -77,6 +79,24 @@ for (const target of targets) {
 if (platform === 'darwin') {
   const universal = 'dist/app-executor-universal-apple-darwin';
   await execa('lipo', ['-create', ...targets.map((target) => `dist/${target.file}`), '-output', universal]);
+  // Read the exact Node runtimes selected by pkg, before its position markers were replaced.
+  const require = createRequire(import.meta.url);
+  const { need } = createRequire(require.resolve('pkg'))('pkg-fetch') as {
+    need: (options: { nodeRange: string; platform: string; arch: string }) => Promise<string>;
+  };
+  const runtimes = await Promise.all(
+    ['x64', 'arm64'].map(async (arch) => readFile(await need({ nodeRange: 'node18', platform: 'macos', arch }))),
+  );
+  const binary = await readFile(universal);
+  relocateUniversalPkg(binary, { x64: runtimes[0]!, arm64: runtimes[1]! });
+  await writeFile(universal, new Uint8Array(binary));
   await execa('codesign', ['--force', '--sign', '-', universal]);
+  // Test the actual universal executable, not just a thin binary that lipo might break.
+  const smoke = await execa(resolve(universal), ['--oauth-login'], {
+    input: '{"cancel":true}\n',
+    timeout: 15000,
+    env: { NODE_OPTIONS: '', NODE_PATH: '', PKG_EXECPATH: '' },
+  });
+  if (smoke.stdout.trim() !== '{"result":false}') throw new Error('Universal executor startup check failed');
   console.log(`Built ${chalk.cyan(universal)} with Intel and Apple Silicon architectures`);
 }
