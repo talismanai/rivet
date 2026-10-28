@@ -21,9 +21,9 @@ class Client extends EventEmitter {
   }
 }
 
-function setup() {
+function setup(options: NonNullable<Parameters<typeof startDebuggerServer>[0]> = {}) {
   const server = Object.assign(new EventEmitter(), { clients: new Set<WebSocket>() });
-  const debuggerServer = startDebuggerServer({ server: server as unknown as WebSocketServer });
+  const debuggerServer = startDebuggerServer({ ...options, server: server as unknown as WebSocketServer });
   const connect = (supportsAuthentication = true) => {
     const client = new Client();
     server.clients.add(client as unknown as WebSocket);
@@ -45,10 +45,62 @@ function setup() {
       },
       controller.signal,
     );
-  return { connect, request, controller };
+  return { connect, request, controller, debuggerServer };
 }
 
 describe('Debugger HTTP authentication', () => {
+  it('reuses a project cache for new processors on the same connection', () => {
+    const { connect, debuggerServer } = setup();
+    connect();
+    const first = debuggerServer.getHttpAuthenticationCache!({} as GraphProcessor, 'one');
+    const second = debuggerServer.getHttpAuthenticationCache!({} as GraphProcessor, 'one');
+    assert.ok(first);
+    first.set('token', 'fixture');
+    assert.equal(second, first);
+    assert.equal(debuggerServer.getHttpAuthenticationCache!({} as GraphProcessor, 'two')!.size, 0);
+  });
+
+  it('clears closed projects while keeping sessions for other open projects', () => {
+    const { connect, debuggerServer } = setup();
+    const client = connect();
+    const cache = debuggerServer.getHttpAuthenticationCache!({} as GraphProcessor, 'one')!;
+    const other = debuggerServer.getHttpAuthenticationCache!({} as GraphProcessor, 'two')!;
+    cache.set('token', 'fixture');
+    other.set('token', 'other');
+    client.emit(
+      'message',
+      Buffer.from(JSON.stringify({ type: 'http-authentication-projects', data: { projectIds: ['two'] } })),
+    );
+    assert.equal(cache.size, 0);
+    assert.equal(other.get('token'), 'other');
+    assert.notEqual(debuggerServer.getHttpAuthenticationCache!({} as GraphProcessor, 'one'), cache);
+  });
+
+  it('isolates session credentials between debugger clients and clears disconnected owners', () => {
+    const { connect, debuggerServer } = setup({
+      getClientsForProcessor: (processor) => [(processor as unknown as { client: WebSocket }).client],
+    });
+    const first = connect();
+    const second = connect();
+    const processor = (client: Client) => ({ client }) as unknown as GraphProcessor;
+    const cache = debuggerServer.getHttpAuthenticationCache!(processor(first), 'one')!;
+    const other = debuggerServer.getHttpAuthenticationCache!(processor(second), 'one')!;
+    cache.set('token', 'fixture');
+    other.set('token', 'other');
+    assert.notEqual(cache, other);
+    first.readyState = 3;
+    first.emit('close');
+    assert.equal(cache.size, 0);
+    assert.equal(other.get('token'), 'other');
+    assert.equal(debuggerServer.getHttpAuthenticationCache!(processor(first), 'one'), undefined);
+  });
+
+  it('does not retain sessions for clients without interactive authentication support', () => {
+    const { connect, debuggerServer } = setup();
+    connect(false);
+    assert.equal(debuggerServer.getHttpAuthenticationCache!({} as GraphProcessor, 'one'), undefined);
+  });
+
   it('preserves the original response when no desktop client is connected', async () => {
     assert.equal(await setup().request(), false);
   });

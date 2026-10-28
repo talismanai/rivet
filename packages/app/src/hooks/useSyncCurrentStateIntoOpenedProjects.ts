@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useAtom, useAtomValue } from 'jotai';
 import { graphState } from '../state/graph';
+import { httpAuthenticationSessionsState } from '../state/httpAuthentication';
 import {
   loadedProjectState,
   type OpenedProjectInfo,
@@ -16,6 +17,11 @@ export function useSyncCurrentStateIntoOpenedProjects() {
   const currentProject = useAtomValue(projectState);
   const loadedProject = useAtomValue(loadedProjectState);
   const currentGraph = useAtomValue(graphState);
+  const authenticationSessions = useAtomValue(httpAuthenticationSessionsState);
+
+  useEffect(() => {
+    authenticationSessions.retain([...openedProjectsSortedIds, currentProject.metadata.id]);
+  }, [authenticationSessions, openedProjectsSortedIds, currentProject.metadata.id]);
 
   // Make sure current opened project is in opened projects
   useEffect(() => {

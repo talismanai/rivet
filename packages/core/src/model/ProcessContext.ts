@@ -31,6 +31,9 @@ export type ProcessContext = {
     signal: AbortSignal,
   ) => Promise<HttpAuthenticationResult>;
 
+  /** Host-owned, in-memory OAuth cache for one open project; reusable across graph executions. */
+  httpAuthenticationCache?: Map<string, unknown>;
+
   /** Optional HTTP transport that exposes manual redirects, including in desktop browser executors. */
   httpRequest?: (url: string, init: RequestInit) => Promise<Response>;
 

@@ -16,6 +16,7 @@ import { toast } from 'react-toastify';
 import { TauriNativeApi } from '../model/native/TauriNativeApi';
 import { requestHttpAuthentication } from '../utils/httpAuthentication';
 import { desktopHttpRequest } from '../utils/desktopHttpRequest';
+import { httpAuthenticationSessionsState } from '../state/httpAuthentication';
 import { useStableCallback } from './useStableCallback';
 import { useSaveCurrentGraph } from './useSaveCurrentGraph';
 import { useCurrentExecution } from './useCurrentExecution';
@@ -50,6 +51,7 @@ export function useLocalExecutor() {
   const projectContext = useAtomValue(projectContextState(project.metadata.id));
   const lastRunData = useAtomValue(lastRunDataByNodeState);
   const loadedProject = useAtomValue(loadedProjectState);
+  const authenticationSessions = useAtomValue(httpAuthenticationSessionsState);
 
   function attachGraphEvents(processor: GraphProcessor) {
     processor.on('nodeStart', currentExecution.onNodeStart);
@@ -159,7 +161,13 @@ export function useLocalExecutor() {
                 globalRivetNodeRegistry.getPlugins(),
               ),
               nativeApi: new TauriNativeApi(),
-              ...(isInTauri() ? { requestHttpAuthentication, httpRequest: desktopHttpRequest } : {}),
+              ...(isInTauri()
+                ? {
+                    requestHttpAuthentication,
+                    httpRequest: desktopHttpRequest,
+                    httpAuthenticationCache: authenticationSessions.forProject(project.metadata.id),
+                  }
+                : {}),
               datasetProvider,
               audioProvider,
               projectPath: loadedProject.path ?? undefined,
@@ -224,7 +232,13 @@ export function useLocalExecutor() {
                   globalRivetNodeRegistry.getPlugins(),
                 ),
                 nativeApi: new TauriNativeApi(),
-                ...(isInTauri() ? { requestHttpAuthentication, httpRequest: desktopHttpRequest } : {}),
+                ...(isInTauri()
+                  ? {
+                      requestHttpAuthentication,
+                      httpRequest: desktopHttpRequest,
+                      httpAuthenticationCache: authenticationSessions.forProject(project.metadata.id),
+                    }
+                  : {}),
                 datasetProvider,
                 audioProvider,
               },

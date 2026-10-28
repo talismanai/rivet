@@ -15,6 +15,7 @@ import {
   type HttpAuthenticationResult,
   isHttpAuthenticationToken,
   newId,
+  HttpAuthenticationSessions,
 } from '@ironclad/rivet-core';
 import { match } from 'ts-pattern';
 import Emittery from 'emittery';
@@ -35,6 +36,7 @@ export interface RivetDebuggerServer {
     request: HttpAuthenticationRequest,
     signal: AbortSignal,
   ) => Promise<HttpAuthenticationResult>;
+  getHttpAuthenticationCache?: (processor: GraphProcessor, projectId: string) => Map<string, unknown> | undefined;
 }
 
 export interface DebuggerEvents {
@@ -83,8 +85,16 @@ export function startDebuggerServer(
     { client: WebSocket; finish: (result?: HttpAuthenticationResult) => void }
   >();
   const authenticationClients = new WeakSet<WebSocket>();
+  const authenticationSessions = new WeakMap<WebSocket, HttpAuthenticationSessions>();
+
+  const authenticationClient = (processor: GraphProcessor) => {
+    const clients = options.getClientsForProcessor?.(processor, [...server.clients]) ?? [...server.clients];
+    return clients.find((client) => client.readyState === WebSocket.OPEN && authenticationClients.has(client));
+  };
 
   server.on('connection', (socket) => {
+    const sessions = new HttpAuthenticationSessions();
+    authenticationSessions.set(socket, sessions);
     if (options.datasetProvider) {
       options.datasetProvider.onrequest = (type, data) => {
         socket.send(
@@ -155,6 +165,16 @@ export function startDebuggerServer(
           .with({ type: 'http-authentication-supported' }, async () => {
             authenticationClients.add(socket);
           })
+          .with({ type: 'http-authentication-projects' }, async () => {
+            const projectIds = (message.data as { projectIds?: unknown } | undefined)?.projectIds;
+            if (
+              Array.isArray(projectIds) &&
+              projectIds.length <= 1024 &&
+              projectIds.every((id) => typeof id === 'string')
+            ) {
+              sessions.retain(projectIds);
+            }
+          })
           .otherwise(async () => {
             const processors = options.getProcessorsForClient?.(socket, attachedProcessors) ?? attachedProcessors;
 
@@ -198,6 +218,8 @@ export function startDebuggerServer(
       void handleMessage(data);
     });
     socket.on('close', () => {
+      sessions.clear();
+      authenticationSessions.delete(socket);
       for (const pending of pendingAuthentication.values()) {
         if (pending.client === socket) pending.finish();
       }
@@ -220,12 +242,14 @@ export function startDebuggerServer(
 
     webSocketServer: server,
 
+    getHttpAuthenticationCache(processor, projectId) {
+      const client = authenticationClient(processor);
+      return client ? authenticationSessions.get(client)?.forProject(projectId) : undefined;
+    },
+
     async requestHttpAuthentication(processor, request, signal) {
       signal.throwIfAborted();
-      const clients = options.getClientsForProcessor?.(processor, [...server.clients]) ?? [...server.clients];
-      const client = clients.find(
-        (candidate) => candidate.readyState === WebSocket.OPEN && authenticationClients.has(candidate),
-      );
+      const client = authenticationClient(processor);
       if (!client) return false;
       const requestId = newId();
       const result = await new Promise<HttpAuthenticationResult>((resolve) => {

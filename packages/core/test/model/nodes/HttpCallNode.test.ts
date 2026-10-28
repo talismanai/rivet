@@ -506,6 +506,111 @@ describe('HTTP Call authentication', () => {
     assert.equal(authenticate.mock.callCount(), 1);
   });
 
+  it('reuses the host project session across new execution caches without extending token expiry', async () => {
+    const authenticate = mockAuthentication(true);
+    const httpAuthenticationCache = new Map();
+    const ctx = () =>
+      context({ httpAuthenticationCache, executionCache: new Map(), requestHttpAuthentication: authenticate });
+    const fetch = mockResponses(new Response('first'), new Response('second'));
+    const first = ctx();
+    await fetchWithHttpAuthentication(endpoint, {}, first, { authenticateBeforeRequest: true });
+    const session = [...httpAuthenticationCache.values()][0];
+    const second = ctx();
+    await fetchWithHttpAuthentication(endpoint, {}, second, { authenticateBeforeRequest: true });
+    assert.equal(authenticate.mock.callCount(), 1);
+    assert.equal(first.executionCache.size, 0);
+    assert.equal(second.executionCache.size, 0);
+    assert.equal([...httpAuthenticationCache.values()][0], session);
+    assert.equal(
+      new Headers((fetch.mock.calls[1]!.arguments[1] as RequestInit).headers).get('authorization'),
+      'Bearer test.jwt.token',
+    );
+  });
+
+  it('requests a new login on a later execution when the shared token has expired', async () => {
+    const authenticate = mockAuthentication(true);
+    const httpAuthenticationCache = new Map();
+    const ctx = () =>
+      context({ httpAuthenticationCache, executionCache: new Map(), requestHttpAuthentication: authenticate });
+    mockResponses(new Response('first'), new Response('second'));
+    await fetchWithHttpAuthentication(endpoint, {}, ctx(), { authenticateBeforeRequest: true });
+    for (const session of httpAuthenticationCache.values()) session.expiresAt = 0;
+    await fetchWithHttpAuthentication(endpoint, {}, ctx(), { authenticateBeforeRequest: true });
+    assert.equal(authenticate.mock.callCount(), 2);
+  });
+
+  for (const status of [401, 403]) {
+    it(`replaces a session rejected with ${status} on a later run and reuses the replacement`, async () => {
+      let logins = 0;
+      const authenticate = mock.fn(async () => ({ accessToken: `jwt.${++logins}`, expiresIn: 3600 }));
+      const httpAuthenticationCache = new Map();
+      const ctx = () =>
+        context({ httpAuthenticationCache, executionCache: new Map(), requestHttpAuthentication: authenticate });
+      const fetch = mockResponses(
+        new Response('first'),
+        new Response('rejected', { status }),
+        new Response('refreshed'),
+        new Response('third'),
+      );
+      for (let run = 0; run < 3; run++) {
+        assert.equal(
+          (await fetchWithHttpAuthentication(endpoint, {}, ctx(), { authenticateBeforeRequest: true })).status,
+          200,
+        );
+      }
+      assert.equal(authenticate.mock.callCount(), 2);
+      assert.equal(
+        new Headers((fetch.mock.calls[3]!.arguments[1] as RequestInit).headers).get('authorization'),
+        'Bearer jwt.2',
+      );
+    });
+  }
+
+  it('does not reuse a project session after its API origin, login configuration, or API key changes', async () => {
+    const authenticate = mockAuthentication(true);
+    const httpAuthenticationCache = new Map();
+    const ctx = () =>
+      context({ httpAuthenticationCache, executionCache: new Map(), requestHttpAuthentication: authenticate });
+    mockResponses(new Response('one'), new Response('two'), new Response('three'), new Response('four'));
+    await fetchWithHttpAuthentication(endpoint, {}, ctx(), { authenticateBeforeRequest: true });
+    await fetchWithHttpAuthentication('https://other.example.com/private', {}, ctx(), {
+      authenticateBeforeRequest: true,
+    });
+    await fetchWithHttpAuthentication(endpoint, {}, ctx(), {
+      authenticateBeforeRequest: true,
+      loginUrl: 'https://other.example.com/login',
+    });
+    await fetchWithHttpAuthentication(endpoint, { headers: { Authorization: 'different-api-key' } }, ctx(), {
+      authenticateBeforeRequest: true,
+    });
+    assert.equal(authenticate.mock.callCount(), 4);
+  });
+
+  it('uses a newly configured API key instead of overriding it with a previous key session', async () => {
+    const httpAuthenticationCache = new Map();
+    const ctx = () =>
+      context({
+        httpAuthenticationCache,
+        executionCache: new Map(),
+        requestHttpAuthentication: mockAuthentication(true),
+      });
+    const fetch = mockResponses(
+      new Response('expired key', { status: 401 }),
+      new Response('authenticated'),
+      new Response('new key'),
+    );
+    await fetchWithHttpAuthentication(endpoint, { headers: { Authorization: 'old-key' } }, ctx(), {
+      preferCachedToken: true,
+    });
+    await fetchWithHttpAuthentication(endpoint, { headers: { Authorization: 'new-key' } }, ctx(), {
+      preferCachedToken: true,
+    });
+    assert.equal(
+      new Headers((fetch.mock.calls[2]!.arguments[1] as RequestInit).headers).get('authorization'),
+      'new-key',
+    );
+  });
+
   for (const status of [401, 403]) {
     for (const initiallyCached of [false, true]) {
       it(`reuses a refreshed JWT after a late ${status} with ${initiallyCached ? 'an old' : 'no'} cached session`, async () => {
