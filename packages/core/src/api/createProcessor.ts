@@ -44,6 +44,7 @@ export type RunGraphOptions = {
   includeTrace?: boolean;
   getChatNodeEndpoint?: ProcessContext['getChatNodeEndpoint'];
   requestHttpAuthentication?: ProcessContext['requestHttpAuthentication'];
+  httpAuthenticationCache?: ProcessContext['httpAuthenticationCache'];
   httpRequest?: ProcessContext['httpRequest'];
   tokenizer?: Tokenizer;
   codeRunner?: CodeRunner;
@@ -179,6 +180,7 @@ export function coreCreateProcessor(project: Project, options: RunGraphOptions) 
           } satisfies Required<Settings>,
           getChatNodeEndpoint: options.getChatNodeEndpoint,
           requestHttpAuthentication: options.requestHttpAuthentication,
+          httpAuthenticationCache: options.httpAuthenticationCache,
           httpRequest: options.httpRequest,
         },
         resolvedInputs,

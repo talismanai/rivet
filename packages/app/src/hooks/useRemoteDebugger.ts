@@ -1,7 +1,7 @@
 import { useLatest } from 'ahooks';
 import { useAtomValue, useAtom } from 'jotai';
 import { remoteDebuggerState, selectedExecutorState } from '../state/execution.js';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { set } from 'lodash-es';
 import { match } from 'ts-pattern';
 import { datasetProvider } from '../utils/globals';
@@ -10,6 +10,7 @@ import { toast } from 'react-toastify';
 import { requestHttpAuthentication } from '../utils/httpAuthentication';
 import { RemoteHttpAuthentication } from '../utils/remoteHttpAuthentication';
 import { isInTauri } from '../utils/tauri';
+import { openedProjectsSortedIdsState, projectState } from '../state/savedGraphs';
 
 let currentDebuggerMessageHandler: ((message: string, data: unknown) => void) | null = null;
 
@@ -22,6 +23,26 @@ let manuallyDisconnecting = false;
 
 export function useRemoteDebugger(options: { onConnect?: () => void; onDisconnect?: () => void } = {}) {
   const [remoteDebugger, setRemoteDebuggerState] = useAtom(remoteDebuggerState);
+  const openProjectIds = useAtomValue(openedProjectsSortedIdsState);
+  const currentProject = useAtomValue(projectState);
+
+  useEffect(() => {
+    const socket = remoteDebugger.socket;
+    if (!socket) return;
+    const notify = () => {
+      if (socket.readyState === WebSocket.OPEN && isInTauri()) {
+        socket.send(
+          JSON.stringify({
+            type: 'http-authentication-projects',
+            data: { projectIds: [...new Set([...openProjectIds, currentProject.metadata.id])] },
+          }),
+        );
+      }
+    };
+    notify();
+    socket.addEventListener('open', notify);
+    return () => socket.removeEventListener('open', notify);
+  }, [remoteDebugger.socket, openProjectIds, currentProject.metadata.id]);
   const onConnectLatest = useLatest(options.onConnect ?? (() => {}));
   const onDisconnectLatest = useLatest(options.onDisconnect ?? (() => {}));
   const [retryDelay, setRetryDelay] = useState(0);

@@ -94,6 +94,9 @@ export function createProcessor(
               ? (request, signal) =>
                   options.remoteDebugger!.requestHttpAuthentication!(processor.processor, request, signal)
               : undefined),
+          httpAuthenticationCache:
+            options.httpAuthenticationCache ??
+            options.remoteDebugger?.getHttpAuthenticationCache?.(processor.processor, project.metadata.id),
           httpRequest: options.httpRequest,
         },
         processor.inputs,

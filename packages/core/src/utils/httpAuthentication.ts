@@ -145,7 +145,10 @@ function getChallenge(
 export async function fetchWithHttpAuthentication(
   url: string,
   init: RequestInit,
-  context: Pick<InternalProcessContext, 'executor' | 'signal' | 'requestHttpAuthentication' | 'httpRequest'> &
+  context: Pick<
+    InternalProcessContext,
+    'executor' | 'signal' | 'requestHttpAuthentication' | 'httpRequest' | 'httpAuthenticationCache'
+  > &
     Partial<Pick<InternalProcessContext, 'executionCache'>>,
   options: HttpAuthenticationOptions = {},
 ): Promise<Response> {
@@ -156,8 +159,9 @@ export async function fetchWithHttpAuthentication(
     return (context.httpRequest ?? fetch)(url, { ...init, signal: context.signal });
   }
 
-  const cacheKey = `httpAuthentication:${JSON.stringify([new URL(url).origin, options.loginUrl ?? '', options.callbackUrl ?? '', options.tokenSource ?? 'auto'])}`;
-  const cached = context.executionCache?.get(cacheKey);
+  const cache = context.httpAuthenticationCache ?? context.executionCache;
+  const cacheKey = `httpAuthentication:${JSON.stringify([new URL(url).origin, options.loginUrl ?? '', options.callbackUrl ?? '', options.tokenSource ?? 'auto', new Headers(init.headers).get('authorization') ?? ''])}`;
+  const cached = cache?.get(cacheKey);
   let usedCachedToken = false;
   if (isReusableSession(cached) && (options.preferCachedToken || !new Headers(init.headers).has('authorization'))) {
     const headers = new Headers(init.headers);
@@ -241,23 +245,17 @@ export async function fetchWithHttpAuthentication(
     ({ response, challenge } = await perform(request, inspectRedirects));
   }
   // A late failure must not invalidate a session refreshed by another concurrent request.
-  const current = context.executionCache?.get(cacheKey);
+  const current = cache?.get(cacheKey);
   const refreshed = current !== cached && isReusableSession(current) ? current : undefined;
   if ((challenge || (response && isAuthenticationFailure(response.status))) && current === cached) {
-    context.executionCache?.delete(cacheKey);
+    cache?.delete(cacheKey);
   }
   let token;
   try {
     if (challenge && refreshed) {
       token = refreshed.token;
     } else if (challenge) {
-      token = await shareLogin(
-        context.executionCache ?? context.signal,
-        cacheKey,
-        authenticate,
-        challenge,
-        context.signal,
-      );
+      token = await shareLogin(cache ?? context.signal, cacheKey, authenticate, challenge, context.signal);
     } else {
       token = false;
     }
@@ -276,16 +274,16 @@ export async function fetchWithHttpAuthentication(
   headers.set('authorization', `Bearer ${token.accessToken}`);
   init = { ...init, headers };
   // Share a valid session immediately with other nodes, even if this API request is still in flight.
-  // Without a supplied lifetime it lasts only for this execution, or until the API rejects it.
+  // Without a supplied lifetime it lasts until the host clears the session or the API rejects it.
   const expiresAt = token.expiresIn ? Date.now() + token.expiresIn * 1000 : Infinity;
-  if (!refreshed) context.executionCache?.set(cacheKey, { token, expiresAt });
+  if (!refreshed) cache?.set(cacheKey, { token, expiresAt });
   await response?.body?.cancel();
   context.signal.throwIfAborted();
   // Re-send the original method/body once. Cross-origin redirects still strip the token.
   const retry = await perform(request, inspectRedirects);
   if (retry.challenge || isAuthenticationFailure(retry.response.status)) {
-    const current = context.executionCache?.get(cacheKey) as { token?: unknown } | undefined;
-    if (current?.token === token) context.executionCache?.delete(cacheKey);
+    const current = cache?.get(cacheKey) as { token?: unknown } | undefined;
+    if (current?.token === token) cache?.delete(cacheKey);
   }
   return retry.response;
 }
