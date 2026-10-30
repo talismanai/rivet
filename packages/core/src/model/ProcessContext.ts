@@ -34,6 +34,9 @@ export type ProcessContext = {
   /** Host-owned, in-memory OAuth cache for one open project; reusable across graph executions. */
   httpAuthenticationCache?: Map<string, unknown>;
 
+  /** Mirrors an OAuth token into the host's project context when a context key is configured. */
+  onHttpAuthenticationToken?: (contextKey: string, token: HttpAuthenticationToken) => void;
+
   /** Optional HTTP transport that exposes manual redirects, including in desktop browser executors. */
   httpRequest?: (url: string, init: RequestInit) => Promise<Response>;
 
@@ -79,6 +82,11 @@ export type HttpAuthenticationRequest = {
 
 export type HttpAuthenticationToken = { accessToken: string; expiresIn?: number };
 export type HttpAuthenticationResult = HttpAuthenticationToken | false;
+
+/** Credential-free browser capture diagnostics. Never include URLs, headers or token values. */
+export type HttpAuthenticationProgress =
+  | { stage: 'waiting' | 'capture-error' }
+  | { stage: 'request'; authorization: 'missing' | 'invalid' | 'valid'; status?: number };
 
 export type ChatNodeEndpointInfo = {
   endpoint: string;

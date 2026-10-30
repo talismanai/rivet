@@ -1,5 +1,5 @@
 import { atom } from 'jotai';
 import { HttpAuthenticationSessions } from '@ironclad/rivet-core';
 
-// Deliberately excluded from atomWithStorage: JWTs must remain in memory only.
+// The session cache is transient. An explicitly configured context mirror is stored separately.
 export const httpAuthenticationSessionsState = atom(() => new HttpAuthenticationSessions());

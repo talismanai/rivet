@@ -2,7 +2,13 @@ import { it, describe } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { EventEmitter } from 'node:events';
 import { type WebSocketServer, type WebSocket } from 'ws';
-import { type GraphProcessor } from '@ironclad/rivet-core';
+import {
+  type GraphProcessor,
+  HttpAuthenticationSessions,
+  signInWithHttpAuthentication,
+  fetchWithHttpAuthentication,
+} from '@ironclad/rivet-core';
+import { syncHttpAuthenticationSessions } from '../../app/src/utils/syncHttpAuthenticationSessions';
 import { startDebuggerServer } from '../src/debugger.js';
 
 /* eslint-disable @typescript-eslint/no-floating-promises */
@@ -49,6 +55,141 @@ function setup(options: NonNullable<Parameters<typeof startDebuggerServer>[0]> =
 }
 
 describe('Debugger HTTP authentication', () => {
+  it('reuses a settings login on a Node connection established later without another prompt', async () => {
+    const sessions = new HttpAuthenticationSessions();
+    const url = 'https://api.example.com';
+    const init = { headers: { authorization: 'configured-api-key' } };
+    const options = {
+      loginUrl: 'https://login.example.com',
+      tokenSource: 'authorization-header' as const,
+      tokenContextKey: 'jwt',
+      preferCachedToken: true,
+    };
+    await signInWithHttpAuthentication(
+      url,
+      init,
+      {
+        signal: new AbortController().signal,
+        httpAuthenticationCache: sessions.forProject('one'),
+        requestHttpAuthentication: async () => ({ accessToken: 'manual.jwt.token', expiresIn: 60 }),
+      },
+      options,
+    );
+    const { connect, debuggerServer } = setup();
+    const client = connect();
+    syncHttpAuthenticationSessions(
+      {
+        readyState: 1,
+        send: (value) => {
+          client.emit('message', Buffer.from(value));
+        },
+      },
+      sessions,
+      ['one'],
+    );
+    const contextValues = {};
+    const response = await fetchWithHttpAuthentication(
+      `${url}/private`,
+      init,
+      {
+        executor: 'nodejs',
+        signal: new AbortController().signal,
+        contextValues,
+        httpAuthenticationCache: debuggerServer.getHttpAuthenticationCache!({} as GraphProcessor, 'one'),
+        requestHttpAuthentication: async () => {
+          assert.fail('A manually authenticated session must not prompt again');
+        },
+        httpRequest: async (_url, request) => {
+          assert.equal(new Headers(request.headers).get('authorization'), 'Bearer manual.jwt.token');
+          return Response.json({ ok: true });
+        },
+      },
+      options,
+    );
+    assert.equal(response.status, 200);
+    assert.deepEqual(contextValues, { jwt: { type: 'string', value: 'Bearer manual.jwt.token' } });
+  });
+
+  it('imports manually authenticated sessions only into the owning client and preserves expiry', () => {
+    const { connect, debuggerServer } = setup({
+      getClientsForProcessor: (processor) => [(processor as unknown as { client: WebSocket }).client],
+    });
+    const owner = connect();
+    const other = connect();
+    const token = { accessToken: 'manual.jwt.token', expiresIn: 60 };
+    const data = { projectId: 'one', cacheKey: 'httpAuthentication:fixture', token, expiresAt: Date.now() + 60000 };
+    owner.emit('message', Buffer.from(JSON.stringify({ type: 'http-authentication-session', data })));
+    const cache = debuggerServer.getHttpAuthenticationCache!({ client: owner } as unknown as GraphProcessor, 'one')!;
+    assert.deepEqual(cache.get(data.cacheKey), { token, expiresAt: data.expiresAt });
+    assert.equal(
+      debuggerServer.getHttpAuthenticationCache!({ client: other } as unknown as GraphProcessor, 'one')!.size,
+      0,
+    );
+    owner.emit(
+      'message',
+      Buffer.from(
+        JSON.stringify({
+          type: 'http-authentication-session',
+          data: { ...data, cacheKey: 'httpAuthentication:expired', expiresAt: Date.now() - 1 },
+        }),
+      ),
+    );
+    owner.emit(
+      'message',
+      Buffer.from(
+        JSON.stringify({
+          type: 'http-authentication-session',
+          data: { ...data, cacheKey: 'httpAuthentication:invalid', token: { accessToken: 'bad\ntoken' } },
+        }),
+      ),
+    );
+    assert.equal(cache.size, 1);
+    owner.emit(
+      'message',
+      Buffer.from(
+        JSON.stringify({
+          type: 'http-authentication-session',
+          data: {
+            ...data,
+            cacheKey: 'httpAuthentication:unlimited',
+            token: { accessToken: 'no.expiry.token' },
+            expiresAt: null,
+          },
+        }),
+      ),
+    );
+    assert.equal((cache.get('httpAuthentication:unlimited') as { expiresAt: number }).expiresAt, Infinity);
+    other.readyState = 3;
+  });
+
+  it('sends mirrored JWTs only to the processor owner, without broadcasting to other clients', () => {
+    const { connect, debuggerServer } = setup({
+      getClientsForProcessor: (processor) => [(processor as unknown as { client: WebSocket }).client],
+    });
+    const owner = connect();
+    const other = connect();
+    const processor = { client: owner } as unknown as GraphProcessor;
+    debuggerServer.publishHttpAuthenticationToken!(processor, 'project-one', 'jwt', {
+      accessToken: 'fixture.jwt.token',
+    });
+    assert.deepEqual(owner.messages, [
+      {
+        message: 'http-authentication-token',
+        data: {
+          projectId: 'project-one',
+          contextKey: 'jwt',
+          token: { accessToken: 'fixture.jwt.token' },
+        },
+      },
+    ]);
+    assert.equal(other.messages.length, 0);
+    owner.readyState = 3;
+    debuggerServer.publishHttpAuthenticationToken!(processor, 'project-one', 'jwt', {
+      accessToken: 'fixture.jwt.token',
+    });
+    assert.equal(owner.messages.length, 1);
+    assert.equal(other.messages.length, 0);
+  });
   it('reuses a project cache for new processors on the same connection', () => {
     const { connect, debuggerServer } = setup();
     connect();
@@ -58,6 +199,34 @@ describe('Debugger HTTP authentication', () => {
     first.set('token', 'fixture');
     assert.equal(second, first);
     assert.equal(debuggerServer.getHttpAuthenticationCache!({} as GraphProcessor, 'two')!.size, 0);
+  });
+
+  it('does not transfer a running processor token or login prompt to another client after disconnect', async () => {
+    const { connect, debuggerServer, controller } = setup();
+    const owner = connect();
+    const other = connect();
+    const processor = {} as GraphProcessor;
+    assert.ok(debuggerServer.getHttpAuthenticationCache!(processor, 'one'));
+    owner.readyState = 3;
+    owner.emit('close');
+    debuggerServer.publishHttpAuthenticationToken!(processor, 'one', 'jwt', { accessToken: 'owner.jwt.token' });
+    assert.equal(
+      await debuggerServer.requestHttpAuthentication!(
+        processor,
+        {
+          requestUrl: 'https://api.example/private',
+          authenticationUrl: 'https://platform.example/login',
+          status: 401,
+        },
+        controller.signal,
+      ),
+      false,
+    );
+    assert.equal(other.messages.length, 0);
+    // A later run may explicitly select the currently connected client.
+    assert.ok(debuggerServer.getHttpAuthenticationCache!(processor, 'one'));
+    debuggerServer.publishHttpAuthenticationToken!(processor, 'one', 'jwt', { accessToken: 'new.jwt.token' });
+    assert.equal(other.messages.length, 1);
   });
 
   it('clears closed projects while keeping sessions for other open projects', () => {

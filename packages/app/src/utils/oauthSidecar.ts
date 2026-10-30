@@ -2,6 +2,7 @@ import {
   isHttpAuthenticationToken,
   type HttpAuthenticationRequest,
   type HttpAuthenticationResult,
+  type HttpAuthenticationProgress,
 } from '@ironclad/rivet-core';
 import type { Command, Child } from '@tauri-apps/api/shell';
 
@@ -10,6 +11,7 @@ export function runOAuthSidecar(
   request: HttpAuthenticationRequest,
   signal: AbortSignal,
   command: Pick<Command, 'stdout' | 'stderr' | 'on' | 'spawn'>,
+  onProgress?: (message: string) => void,
 ): Promise<HttpAuthenticationResult> {
   signal.throwIfAborted();
   return new Promise((resolve, reject) => {
@@ -40,7 +42,40 @@ export function runOAuthSidecar(
     command.stdout.on('data', (line) => {
       if (settled) return;
       try {
-        const message = JSON.parse(line) as { result?: unknown; error?: unknown; browserOpen?: unknown };
+        const message = JSON.parse(line) as {
+          result?: unknown;
+          error?: unknown;
+          browserOpen?: unknown;
+          progress?: unknown;
+        };
+        if ('progress' in message) {
+          const progress = message.progress as Partial<HttpAuthenticationProgress> | null;
+          if (progress?.stage === 'waiting') {
+            onProgress?.(
+              `Waiting for a Bearer JWT in requests initiated by ${new URL(request.authenticationUrl).origin}.`,
+            );
+          } else if (progress?.stage === 'capture-error') {
+            onProgress?.('Chrome could not enable network capture for a browser target.');
+          } else if (
+            progress?.stage === 'request' &&
+            ['missing', 'invalid', 'valid'].includes(progress.authorization ?? '')
+          ) {
+            const header = {
+              missing: 'no Authorization header detected',
+              invalid: 'Authorization detected, but it is not a valid, unexpired Bearer JWT',
+              valid: 'Bearer JWT detected',
+            }[progress.authorization!];
+            const status =
+              typeof progress.status === 'number' &&
+              Number.isInteger(progress.status) &&
+              progress.status >= 100 &&
+              progress.status <= 599
+                ? `HTTP ${progress.status}`
+                : 'waiting for response';
+            onProgress?.(`Login-page request: ${header}; ${status}.`);
+          }
+          return;
+        }
         if (typeof message.error === 'string') finish(false, new Error(message.error), message.browserOpen === true);
         else if (message.result === false || isHttpAuthenticationToken(message.result)) finish(message.result);
         else finish(false, new Error('OAuth helper returned an invalid access token'));

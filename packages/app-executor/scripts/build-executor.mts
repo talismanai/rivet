@@ -4,7 +4,7 @@ import { execa } from 'execa';
 import chalk from 'chalk';
 import * as esbuild from 'esbuild';
 import { resolve } from 'node:path';
-import { relocateUniversalPkg } from './relocate-universal-pkg.mjs';
+import { relocateUniversalPkg, repairSignedUniversalPkg } from './relocate-universal-pkg.mjs';
 
 const resolveRivet: esbuild.Plugin = {
   name: 'resolve-rivet',
@@ -90,7 +90,14 @@ if (platform === 'darwin') {
   const binary = await readFile(universal);
   relocateUniversalPkg(binary, { x64: runtimes[0]!, arm64: runtimes[1]! });
   await writeFile(universal, new Uint8Array(binary));
-  await execa('codesign', ['--force', '--sign', '-', universal]);
+  for (let attempt = 0; ; attempt++) {
+    await execa('codesign', ['--force', '--sign', '-', universal]);
+    const signed = await readFile(universal);
+    if (!repairSignedUniversalPkg(signed, { x64: runtimes[0]!, arm64: runtimes[1]! })) break;
+    if (attempt >= 2)
+      throw new Error('Signing repeatedly moved the pkg payload; refusing to package an invalid executor');
+    await writeFile(universal, new Uint8Array(signed));
+  }
   // Test the actual universal executable, not just a thin binary that lipo might break.
   const smoke = await execa(resolve(universal), ['--oauth-login'], {
     input: '{"cancel":true}\n',

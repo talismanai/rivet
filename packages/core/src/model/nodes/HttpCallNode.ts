@@ -25,6 +25,7 @@ export type HttpCallNodeData = {
 
   authenticationUrl?: string;
   authenticationCallbackUrl?: string;
+  authenticationTokenContextKey?: string;
 
   headers: string;
   useHeadersInput?: boolean;
@@ -165,10 +166,17 @@ export class HttpCallNodeImpl extends NodeImpl<HttpCallNode> {
       },
       {
         type: 'string',
+        label: 'OAuth token context key',
+        dataKey: 'authenticationTokenContextKey',
+        helperMessage:
+          'Optional project context key for Bearer <jwt>. Saved as a secret context value after login or session reuse.',
+      },
+      {
+        type: 'string',
         label: 'OAuth callback URL',
         dataKey: 'authenticationCallbackUrl',
         helperMessage:
-          'Platform endpoint returning data.access_token. For an official login page without redirect_uri, leave empty to capture Authorization headers sent to the request origin.',
+          'Platform endpoint returning data.access_token. For an official login page without redirect_uri, leave empty to capture Authorization headers from requests initiated by the login page.',
       },
       {
         type: 'code',
@@ -275,7 +283,11 @@ export class HttpCallNodeImpl extends NodeImpl<HttpCallNode> {
           mode: 'cors',
         },
         context,
-        { loginUrl: this.data.authenticationUrl, callbackUrl: this.data.authenticationCallbackUrl },
+        {
+          loginUrl: this.data.authenticationUrl,
+          callbackUrl: this.data.authenticationCallbackUrl,
+          tokenContextKey: this.data.authenticationTokenContextKey,
+        },
       );
 
       const output: Outputs = {

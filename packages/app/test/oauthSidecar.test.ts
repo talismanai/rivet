@@ -10,7 +10,7 @@ const request = {
   callbackUrl: 'https://api.example.com/callback',
   status: 401,
 };
-function setup() {
+function setup(onProgress?: (message: string) => void) {
   const events = new EventEmitter();
   const stdout = new EventEmitter();
   const stderr = new EventEmitter();
@@ -21,6 +21,7 @@ function setup() {
     request,
     controller.signal,
     command as unknown as Pick<Command, 'stdout' | 'stderr' | 'on' | 'spawn'>,
+    onProgress,
   );
   return { events, stdout, stderr, child, controller, pending };
 }
@@ -99,4 +100,32 @@ it('requires a protocol result even when the helper exits successfully', async (
   const { events, pending } = setup();
   events.emit('close', { code: 0, signal: null });
   await assert.rejects(pending, /exit code 0/);
+});
+
+it('reports capture progress without completing sign-in or exposing arbitrary helper fields', async () => {
+  const progress: string[] = [];
+  const { stdout, pending } = setup((message) => progress.push(message));
+  let settled = false;
+  void pending.then(() => {
+    settled = true;
+  });
+  stdout.emit('data', JSON.stringify({ progress: { stage: 'waiting', token: 'secret.jwt.token' } }));
+  stdout.emit(
+    'data',
+    JSON.stringify({ progress: { stage: 'request', authorization: 'valid', status: 200, token: 'secret.jwt.token' } }),
+  );
+  stdout.emit(
+    'data',
+    JSON.stringify({ progress: { stage: 'request', authorization: 'invalid', status: 'secret.jwt.token' } }),
+  );
+  stdout.emit('data', JSON.stringify({ progress: { stage: 'secret.jwt.token' } }));
+  await Promise.resolve();
+  assert.equal(settled, false);
+  assert.equal(progress.length, 3);
+  assert.match(progress[0]!, /Waiting.*https:\/\/auth.example.com/);
+  assert.match(progress[1]!, /Bearer JWT detected; HTTP 200/);
+  assert.match(progress[2]!, /not a valid, unexpired Bearer JWT; waiting for response/);
+  assert.ok(!JSON.stringify(progress).includes('secret'));
+  stdout.emit('data', '{"result":false}');
+  assert.equal(await pending, false);
 });

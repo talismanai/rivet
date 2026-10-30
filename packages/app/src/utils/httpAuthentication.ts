@@ -7,6 +7,7 @@ import { runOAuthSidecar } from './oauthSidecar';
 export async function requestHttpAuthentication(
   request: HttpAuthenticationRequest,
   signal: AbortSignal,
+  onProgress?: (message: string) => void,
 ): Promise<HttpAuthenticationResult> {
   signal.throwIfAborted();
   if (!isInTauri()) return false;
@@ -24,5 +25,6 @@ export async function requestHttpAuthentication(
     { ...request, tokenSource, ...(callback ? { callbackUrl: callback.href } : {}) },
     signal,
     Command.sidecar('../../app-executor/dist/app-executor', ['--oauth-login']),
+    onProgress,
   );
 }

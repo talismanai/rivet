@@ -13,9 +13,11 @@ import {
   type Outputs,
   type HttpAuthenticationRequest,
   type HttpAuthenticationResult,
+  type HttpAuthenticationToken,
   isHttpAuthenticationToken,
   newId,
   HttpAuthenticationSessions,
+  isReusableHttpAuthenticationSession,
 } from '@ironclad/rivet-core';
 import { match } from 'ts-pattern';
 import Emittery from 'emittery';
@@ -37,6 +39,12 @@ export interface RivetDebuggerServer {
     signal: AbortSignal,
   ) => Promise<HttpAuthenticationResult>;
   getHttpAuthenticationCache?: (processor: GraphProcessor, projectId: string) => Map<string, unknown> | undefined;
+  publishHttpAuthenticationToken?: (
+    processor: GraphProcessor,
+    projectId: string,
+    contextKey: string,
+    token: HttpAuthenticationToken,
+  ) => void;
 }
 
 export interface DebuggerEvents {
@@ -86,10 +94,22 @@ export function startDebuggerServer(
   >();
   const authenticationClients = new WeakSet<WebSocket>();
   const authenticationSessions = new WeakMap<WebSocket, HttpAuthenticationSessions>();
+  const authenticationOwners = new WeakMap<GraphProcessor, WebSocket>();
 
-  const authenticationClient = (processor: GraphProcessor) => {
+  const authenticationClient = (processor: GraphProcessor, newRun = false) => {
     const clients = options.getClientsForProcessor?.(processor, [...server.clients]) ?? [...server.clients];
-    return clients.find((client) => client.readyState === WebSocket.OPEN && authenticationClients.has(client));
+    const owner = authenticationOwners.get(processor);
+    if (owner && !newRun) {
+      return clients.includes(owner) && owner.readyState === WebSocket.OPEN && authenticationClients.has(owner)
+        ? owner
+        : undefined;
+    }
+    const client = clients.find(
+      (candidate) => candidate.readyState === WebSocket.OPEN && authenticationClients.has(candidate),
+    );
+    if (client) authenticationOwners.set(processor, client);
+    else if (newRun) authenticationOwners.delete(processor);
+    return client;
   };
 
   server.on('connection', (socket) => {
@@ -164,6 +184,31 @@ export function startDebuggerServer(
           })
           .with({ type: 'http-authentication-supported' }, async () => {
             authenticationClients.add(socket);
+          })
+          .with({ type: 'http-authentication-session' }, async () => {
+            if (!authenticationClients.has(socket)) return;
+            const { projectId, cacheKey, token, expiresAt } = (message.data ?? {}) as {
+              projectId?: unknown;
+              cacheKey?: unknown;
+              token?: unknown;
+              expiresAt?: unknown;
+            };
+            if (
+              typeof projectId !== 'string' ||
+              !projectId ||
+              projectId.length > 1024 ||
+              typeof cacheKey !== 'string' ||
+              !cacheKey.startsWith('httpAuthentication:') ||
+              cacheKey.length > 65536 ||
+              !isHttpAuthenticationToken(token) ||
+              !(
+                (typeof expiresAt === 'number' && Number.isFinite(expiresAt)) ||
+                (expiresAt === null && token.expiresIn === undefined)
+              )
+            )
+              return;
+            const session = { token, expiresAt: expiresAt === null ? Infinity : (expiresAt as number) };
+            if (isReusableHttpAuthenticationSession(session)) sessions.forProject(projectId).set(cacheKey, session);
           })
           .with({ type: 'http-authentication-projects' }, async () => {
             const projectIds = (message.data as { projectIds?: unknown } | undefined)?.projectIds;
@@ -243,8 +288,20 @@ export function startDebuggerServer(
     webSocketServer: server,
 
     getHttpAuthenticationCache(processor, projectId) {
-      const client = authenticationClient(processor);
+      // Called when a processor starts a run. Keep subsequent prompts/token delivery
+      // on this connection even if a different client connects after it disconnects.
+      const client = authenticationClient(processor, true);
       return client ? authenticationSessions.get(client)?.forProject(projectId) : undefined;
+    },
+
+    publishHttpAuthenticationToken(processor, projectId, contextKey, token) {
+      const client = authenticationClient(processor);
+      client?.send(
+        JSON.stringify({
+          message: 'http-authentication-token',
+          data: { projectId, contextKey, token },
+        }),
+      );
     },
 
     async requestHttpAuthentication(processor, request, signal) {

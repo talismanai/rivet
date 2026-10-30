@@ -14,18 +14,102 @@ export type HttpAuthenticationOptions = {
   preferCachedToken?: boolean;
   /** Sign in before sending a request when no reusable session is available. */
   authenticateBeforeRequest?: boolean;
+  /** Copy Bearer <access token> into this project context key after login or cache reuse. */
+  tokenContextKey?: string;
 };
 
-type CachedSession = { token: HttpAuthenticationToken; expiresAt: number };
+export type CachedHttpAuthenticationSession = { token: HttpAuthenticationToken; expiresAt: number };
 
-function isReusableSession(value: unknown): value is CachedSession {
-  const session = value as Partial<CachedSession> | undefined;
+export function isReusableHttpAuthenticationSession(value: unknown): value is CachedHttpAuthenticationSession {
+  const session = value as Partial<CachedHttpAuthenticationSession> | undefined;
   return (
     !!session &&
     isHttpAuthenticationToken(session.token) &&
     typeof session.expiresAt === 'number' &&
     session.expiresAt > Date.now()
   );
+}
+
+type AuthenticationContext = Pick<
+  InternalProcessContext,
+  'signal' | 'requestHttpAuthentication' | 'httpAuthenticationCache' | 'onHttpAuthenticationToken'
+> &
+  Partial<Pick<InternalProcessContext, 'executionCache' | 'contextValues'>>;
+
+export function getHttpAuthenticationCacheKey(
+  url: string,
+  init: RequestInit,
+  options: HttpAuthenticationOptions,
+): string {
+  return `httpAuthentication:${JSON.stringify([new URL(url).origin, options.loginUrl ?? '', options.callbackUrl ?? '', options.tokenSource ?? 'auto', new Headers(init.headers).get('authorization') ?? ''])}`;
+}
+
+function publishToken(
+  context: AuthenticationContext,
+  options: HttpAuthenticationOptions,
+  token: HttpAuthenticationToken,
+) {
+  const key = options.tokenContextKey?.trim();
+  if (!key) return;
+  if (context.contextValues) {
+    Object.defineProperty(context.contextValues, key, {
+      value: { type: 'string', value: `Bearer ${token.accessToken}` },
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+  }
+  context.onHttpAuthenticationToken?.(key, token);
+}
+
+function createChallenge(
+  requestUrl: string,
+  target: URL,
+  status: number,
+  options: HttpAuthenticationOptions,
+): HttpAuthenticationRequest {
+  const callback = options.callbackUrl?.trim() || target.searchParams.get('redirect_uri');
+  const callbackUrl = callback ? getAuthenticationUrl(callback, target.href)?.href : undefined;
+  return {
+    requestUrl,
+    authenticationUrl: target.href,
+    status,
+    ...(options.tokenSource ? { tokenSource: options.tokenSource } : {}),
+    ...(callbackUrl ? { callbackUrl } : {}),
+  };
+}
+
+/** Force a new sign-in without making an API request. Uses the same cache and context logic as nodes. */
+export async function signInWithHttpAuthentication(
+  url: string,
+  init: RequestInit,
+  context: AuthenticationContext,
+  options: HttpAuthenticationOptions,
+): Promise<HttpAuthenticationResult> {
+  context.signal.throwIfAborted();
+  if (!context.requestHttpAuthentication) throw new Error('OAuth authentication requires an interactive host');
+  const requestUrl = getAuthenticationUrl(url, url);
+  const login = options.loginUrl?.trim();
+  const target = login && requestUrl ? getAuthenticationUrl(login, requestUrl.href) : undefined;
+  if (!requestUrl || !target) throw new Error('Set a valid API URL and OAuth login URL before signing in');
+  const cache = context.httpAuthenticationCache ?? context.executionCache;
+  const cacheKey = getHttpAuthenticationCacheKey(url, init, options);
+  const result = await shareLogin(
+    cache ?? context.signal,
+    cacheKey,
+    context.requestHttpAuthentication,
+    createChallenge(requestUrl.href, target, 0, options),
+    context.signal,
+  );
+  context.signal.throwIfAborted();
+  if (!result) return false;
+  if (!isHttpAuthenticationToken(result)) throw new Error('Authentication did not return a valid access token');
+  cache?.set(cacheKey, {
+    token: result,
+    expiresAt: result.expiresIn ? Date.now() + result.expiresIn * 1000 : Infinity,
+  });
+  publishToken(context, options, result);
+  return result;
 }
 
 type PendingLogin = {
@@ -129,14 +213,7 @@ function getChallenge(
     (response.status === 302 && location && isOAuthAuthorizationUrl(target)) ||
     (response.redirected && isOAuthAuthorizationUrl(target))
   ) {
-    const callback = options.callbackUrl?.trim() || target.searchParams.get('redirect_uri');
-    return {
-      requestUrl,
-      authenticationUrl: target.href,
-      status: response.status,
-      ...(options.tokenSource ? { tokenSource: options.tokenSource } : {}),
-      ...(callback ? { callbackUrl: getAuthenticationUrl(callback, target.href)?.href } : {}),
-    };
+    return createChallenge(requestUrl, target, response.status, options);
   }
   return undefined;
 }
@@ -147,9 +224,14 @@ export async function fetchWithHttpAuthentication(
   init: RequestInit,
   context: Pick<
     InternalProcessContext,
-    'executor' | 'signal' | 'requestHttpAuthentication' | 'httpRequest' | 'httpAuthenticationCache'
+    | 'executor'
+    | 'signal'
+    | 'requestHttpAuthentication'
+    | 'httpRequest'
+    | 'httpAuthenticationCache'
+    | 'onHttpAuthenticationToken'
   > &
-    Partial<Pick<InternalProcessContext, 'executionCache'>>,
+    Partial<Pick<InternalProcessContext, 'executionCache' | 'contextValues'>>,
   options: HttpAuthenticationOptions = {},
 ): Promise<Response> {
   context.signal.throwIfAborted();
@@ -160,14 +242,18 @@ export async function fetchWithHttpAuthentication(
   }
 
   const cache = context.httpAuthenticationCache ?? context.executionCache;
-  const cacheKey = `httpAuthentication:${JSON.stringify([new URL(url).origin, options.loginUrl ?? '', options.callbackUrl ?? '', options.tokenSource ?? 'auto', new Headers(init.headers).get('authorization') ?? ''])}`;
+  const cacheKey = getHttpAuthenticationCacheKey(url, init, options);
   const cached = cache?.get(cacheKey);
   let usedCachedToken = false;
-  if (isReusableSession(cached) && (options.preferCachedToken || !new Headers(init.headers).has('authorization'))) {
+  if (
+    isReusableHttpAuthenticationSession(cached) &&
+    (options.preferCachedToken || !new Headers(init.headers).has('authorization'))
+  ) {
     const headers = new Headers(init.headers);
     headers.set('authorization', `Bearer ${cached.token.accessToken}`);
     init = { ...init, headers };
     usedCachedToken = true;
+    publishToken(context, options, cached.token);
   }
 
   const perform = async (
@@ -233,20 +319,13 @@ export async function fetchWithHttpAuthentication(
     const loginUrl = options.loginUrl?.trim();
     const target = loginUrl ? getAuthenticationUrl(loginUrl, url) : undefined;
     if (!target) throw new Error('A valid OAuth login URL is required before sending the request');
-    const callback = options.callbackUrl?.trim() || target.searchParams.get('redirect_uri');
-    challenge = {
-      requestUrl: url,
-      authenticationUrl: target.href,
-      status: 0,
-      ...(options.tokenSource ? { tokenSource: options.tokenSource } : {}),
-      ...(callback ? { callbackUrl: getAuthenticationUrl(callback, target.href)?.href } : {}),
-    };
+    challenge = createChallenge(url, target, 0, options);
   } else {
     ({ response, challenge } = await perform(request, inspectRedirects));
   }
   // A late failure must not invalidate a session refreshed by another concurrent request.
   const current = cache?.get(cacheKey);
-  const refreshed = current !== cached && isReusableSession(current) ? current : undefined;
+  const refreshed = current !== cached && isReusableHttpAuthenticationSession(current) ? current : undefined;
   if ((challenge || (response && isAuthenticationFailure(response.status))) && current === cached) {
     cache?.delete(cacheKey);
   }
@@ -277,6 +356,7 @@ export async function fetchWithHttpAuthentication(
   // Without a supplied lifetime it lasts until the host clears the session or the API rejects it.
   const expiresAt = token.expiresIn ? Date.now() + token.expiresIn * 1000 : Infinity;
   if (!refreshed) cache?.set(cacheKey, { token, expiresAt });
+  publishToken(context, options, token);
   await response?.body?.cancel();
   context.signal.throwIfAborted();
   // Re-send the original method/body once. Cross-origin redirects still strip the token.

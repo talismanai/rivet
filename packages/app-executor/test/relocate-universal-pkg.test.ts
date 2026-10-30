@@ -1,6 +1,6 @@
 import { it } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { relocateUniversalPkg } from '../scripts/relocate-universal-pkg.mjs';
+import { relocateUniversalPkg, repairSignedUniversalPkg } from '../scripts/relocate-universal-pkg.mjs';
 
 const prefix = '(function(process, require, console, EXECPATH_FD, PAYLOAD_POSITION, PAYLOAD_SIZE)';
 const payload = Buffer.from('embedded JavaScript');
@@ -83,4 +83,40 @@ void it('rejects corrupted or already relocated bootstrap offsets', () => {
   const valid = fixture();
   relocateUniversalPkg(valid.binary, valid.runtimes);
   assert.throws(() => relocateUniversalPkg(valid.binary, valid.runtimes), /layout/);
+});
+
+void it('repairs payload movement during signing, including relocation of the next architecture', () => {
+  const { binary, runtimes, offsets, values } = fixture();
+  relocateUniversalPkg(binary, runtimes);
+  for (let index = 0; index < 2; index++) {
+    const start = offsets[index]! + values[0]!;
+    const block = Buffer.from(new Uint8Array(binary.subarray(start, start + payload.length + prelude.length)));
+    const movement = 32 * (index + 1);
+    binary.fill(0, start, start + block.length + movement);
+    binary.set(block, start + movement);
+    binary.writeUInt32BE(values[0]! + block.length + movement, 8 + index * 20 + 12);
+  }
+  const old = offsets[1]!;
+  const size = binary.readUInt32BE(40);
+  const slice = Buffer.from(new Uint8Array(binary.subarray(old, old + size)));
+  binary.fill(0, old, old + size);
+  offsets[1] = old + 128;
+  binary.writeUInt32BE(offsets[1], 36);
+  binary.set(slice, offsets[1]);
+  assert.equal(repairSignedUniversalPkg(binary, runtimes), true);
+  for (const offset of offsets) {
+    const position = Number(binary.toString('ascii', offset + 64, offset + 64 + '// PAYLOAD_POSITION //'.length));
+    assert.deepEqual(binary.subarray(position, position + payload.length), payload);
+    assert.deepEqual(binary.subarray(position + payload.length, position + payload.length + prelude.length), prelude);
+  }
+  assert.equal(repairSignedUniversalPkg(binary, runtimes), false);
+});
+
+void it('refuses to repair malformed signed payloads before modifying either architecture', () => {
+  const { binary, runtimes, offsets, values } = fixture();
+  relocateUniversalPkg(binary, runtimes);
+  binary.write('broken', offsets[1]! + values[2]!, 'ascii');
+  const original = Buffer.from(new Uint8Array(binary));
+  assert.throws(() => repairSignedUniversalPkg(binary, runtimes), /layout/);
+  assert.deepEqual(binary, original);
 });

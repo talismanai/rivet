@@ -43,6 +43,16 @@ void describe('Chrome OAuth interception', () => {
     await assert.rejects(pipe.command('Page.navigate'), /closed/);
   });
 
+  void it('reports a lost debugging connection even when no command is pending', () => {
+    const input = new PassThrough();
+    const pipe = new ChromeDebuggingPipe(new PassThrough(), input);
+    let closed = 0;
+    pipe.onClose = () => closed++;
+    input.emit('close');
+    pipe.dispose();
+    assert.equal(closed, 1);
+  });
+
   void it('matches only the configured callback origin and path, retaining configured query constraints', () => {
     const callback = 'https://api.example.com/api/callback?tenant=one';
     assert.ok(matchesOAuthCallback(callback + '&code=code&state=state', callback));
@@ -235,6 +245,150 @@ void it(
 
 void describe('Official login Authorization header capture', () => {
   const jwt = (claims: object) => `e30.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.signature`;
+  for (const fixture of [
+    { name: 'made by login page workers', worker: true, cors: true, redirect: false },
+    { name: 'whose successful responses are blocked by CORS', worker: false, cors: false, redirect: false },
+    { name: 'after ignoring a JWT stripped by a cross-origin redirect', worker: false, cors: true, redirect: true },
+  ]) {
+    void it(
+      `captures authorized requests ${fixture.name}`,
+      { skip: process.env.RIVET_TEST_CHROME !== '1', timeout: 30000 },
+      async () => {
+        const token = jwt({ exp: Math.floor(Date.now() / 1000) + 3600, source: 'worker' });
+        let login = '';
+        let capture = '';
+        let verified = false;
+        const server = createServer((request, response) => {
+          if (fixture.cors || request.method === 'OPTIONS') response.setHeader('Access-Control-Allow-Origin', login);
+          response.setHeader('Access-Control-Allow-Headers', 'Authorization');
+          if (request.method === 'OPTIONS') {
+            response.writeHead(204);
+            response.end();
+            return;
+          }
+          if (request.url === '/login') {
+            response.writeHead(200, { 'content-type': 'text/html' });
+            response.end(
+              fixture.worker
+                ? '<script>new Worker("/auth-worker.js")</script>'
+                : `<script>(async()=>{
+                    ${fixture.redirect ? `await fetch('/redirect',{headers:{Authorization:${JSON.stringify('Bearer ' + jwt({ source: 'stripped', exp: Math.floor(Date.now() / 1000) + 3600 }))}}});` : ''}
+                    await fetch(${JSON.stringify(capture + '/verified')},{headers:{Authorization:${JSON.stringify('Bearer ' + token)}}});
+                  })()</script>`,
+            );
+          } else if (request.url === '/redirect') {
+            response.writeHead(302, { location: capture + '/public' });
+            response.end();
+          } else if (request.url === '/auth-worker.js') {
+            response.writeHead(200, { 'content-type': 'text/javascript' });
+            response.end(
+              `fetch(${JSON.stringify(capture + '/verified')},{headers:{Authorization:${JSON.stringify('Bearer ' + token)}}});`,
+            );
+          } else {
+            if (request.url === '/public') assert.equal(request.headers.authorization, undefined);
+            verified ||= request.url === '/verified';
+            response.writeHead(200, { 'content-type': 'application/json' });
+            response.end('{}');
+          }
+        });
+        await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+        const address = server.address();
+        assert.ok(address && typeof address === 'object');
+        login = `http://127.0.0.1:${address.port}`;
+        capture = `http://localhost:${address.port}`;
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10000);
+        const progress: unknown[] = [];
+        try {
+          const result = await authenticateInChrome(
+            {
+              requestUrl: 'https://destination.example.invalid/private',
+              authenticationUrl: login + '/login',
+              tokenSource: 'authorization-header',
+              status: 0,
+            },
+            controller.signal,
+            { onProgress: (event) => progress.push(event) },
+          ).catch((error: Error) => {
+            throw new Error(`${error.message}; capture progress: ${JSON.stringify(progress)}`);
+          });
+          assert.ok(verified);
+          assert.ok(result);
+          assert.equal(result.accessToken, token);
+          assert.ok(
+            progress.some(
+              (event: any) => event.stage === 'request' && event.authorization === 'valid' && event.status === 200,
+            ),
+          );
+          assert.ok(!JSON.stringify(progress).includes(token));
+        } finally {
+          clearTimeout(timeout);
+          controller.abort();
+          await new Promise<void>((resolve) => server.close(() => resolve()));
+          assert.ok(verified, 'the browser actually sent the authorized request');
+        }
+      },
+    );
+  }
+  void it(
+    'discovers the API origin and ignores JWTs sent by unrelated provider frames',
+    { skip: process.env.RIVET_TEST_CHROME !== '1', timeout: 30000 },
+    async () => {
+      const token = jwt({ exp: Math.floor(Date.now() / 1000) + 3600, source: 'capture' });
+      const unrelated = jwt({ exp: Math.floor(Date.now() / 1000) + 3600, source: 'provider-frame' });
+      let login = '';
+      let capture = '';
+      const server = createServer((request, response) => {
+        response.setHeader('Access-Control-Allow-Origin', login);
+        response.setHeader('Access-Control-Allow-Headers', 'Authorization');
+        if (request.method === 'OPTIONS') {
+          response.writeHead(204);
+          response.end();
+          return;
+        }
+        if (request.url === '/login') {
+          response.writeHead(200, { 'content-type': 'text/html' });
+          response.end(`<script>window.addEventListener('message', async (event)=>{
+            if(event.origin !== ${JSON.stringify(capture)} || event.data !== 'provider-ready') return;
+            await fetch(${JSON.stringify(capture + '/verified')},{headers:{Authorization:${JSON.stringify('Bearer ' + token)}}});
+          });</script><iframe src="${capture}/provider"></iframe>`);
+        } else if (request.url === '/provider') {
+          response.writeHead(200, { 'content-type': 'text/html' });
+          response.end(`<script>(async()=>{
+            await fetch('/provider-api',{headers:{Authorization:${JSON.stringify('Bearer ' + unrelated)}}});
+            parent.postMessage('provider-ready', ${JSON.stringify(login)});
+          })()</script>`);
+        } else {
+          response.writeHead(200, { 'content-type': 'application/json' });
+          response.end('{}');
+        }
+      });
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const address = server.address();
+      assert.ok(address && typeof address === 'object');
+      login = `http://127.0.0.1:${address.port}`;
+      capture = `http://localhost:${address.port}`;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 20000);
+      try {
+        const result = await authenticateInChrome(
+          {
+            requestUrl: 'https://destination.example.invalid/private',
+            authenticationUrl: login + '/login',
+            tokenSource: 'authorization-header',
+            status: 0,
+          },
+          controller.signal,
+        );
+        assert.ok(result);
+        assert.equal(result.accessToken, token);
+      } finally {
+        clearTimeout(timeout);
+        controller.abort();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    },
+  );
   void it('parses a Bearer JWT and its expiry without requiring an access-token token_use', () => {
     const token = jwt({ token_use: 'id', aud: 'admin-client', exp: Math.floor(Date.now() / 1000) + 3600 });
     const result = bearerTokenFromHeaders({ AUTHORIZATION: `Bearer ${token}` });
@@ -253,12 +407,12 @@ void describe('Official login Authorization header capture', () => {
     }
   });
   void it(
-    'captures only a token accepted by the configured API after login',
+    'captures only a valid JWT accepted by a login-page API request',
     { skip: process.env.RIVET_TEST_CHROME !== '1', timeout: 30000 },
     async () => {
       const token = jwt({ token_use: 'id', aud: 'admin-client', exp: Math.floor(Date.now() / 1000) + 3600 });
       const rejected = jwt({ exp: Math.floor(Date.now() / 1000) + 3600, source: 'rejected' });
-      const unrelated = jwt({ exp: Math.floor(Date.now() / 1000) + 3600, source: 'unrelated' });
+      const unrelated = 'opaque-session-token';
       let base = '';
       let api = '';
       const seen: string[] = [];
