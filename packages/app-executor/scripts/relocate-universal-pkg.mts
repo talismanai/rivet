@@ -71,3 +71,58 @@ export function relocateUniversalPkg(binary: Buffer, runtimes: Record<Architectu
   // Validate both slices before changing either one.
   for (const patch of patches) binary.write(patch.value, patch.offset, 'ascii');
 }
+
+/** codesign may move pkg's appended payload and the following fat slices when allocating signatures. */
+export function repairSignedUniversalPkg(binary: Buffer, runtimes: Record<Architecture, Buffer>): boolean {
+  if (binary.length < 48 || binary.readUInt32BE(0) !== 0xcafebabe || binary.readUInt32BE(4) !== 2)
+    throw new Error('Expected a Mach-O universal executable after signing');
+  const seen = new Set<Architecture>();
+  const patches: { offset: number; width: number; value: number }[] = [];
+  for (let index = 0; index < 2; index++) {
+    const header = 8 + index * 20;
+    const architecture = architectures.get(binary.readUInt32BE(header));
+    if (!architecture || seen.has(architecture)) throw new Error('Unexpected signed executor architecture');
+    seen.add(architecture);
+    const offset = binary.readUInt32BE(header + 8);
+    const size = binary.readUInt32BE(header + 12);
+    if (offset < 48 || offset + size > binary.length) throw new Error('Invalid signed executor slice bounds');
+    const positions = fields.map((field) => {
+      const marker = `// ${field} //`;
+      const position = runtimes[architecture].indexOf(marker);
+      if (
+        position < 0 ||
+        runtimes[architecture].indexOf(marker, position + 1) !== -1 ||
+        position + marker.length > size
+      )
+        throw new Error('Cannot locate signed pkg runtime fields');
+      const text = binary.toString('ascii', offset + position, offset + position + marker.length);
+      if (!/^\d+ *$/.test(text)) throw new Error('Invalid signed pkg runtime fields');
+      return { offset: offset + position, width: marker.length, value: Number(text) };
+    });
+    const [payload, payloadSize, prelude, preludeSize] = positions;
+    const actual = binary.indexOf(preludePrefix, offset);
+    if (
+      !payload ||
+      !payloadSize ||
+      !prelude ||
+      !preludeSize ||
+      payloadSize.value <= 0 ||
+      prelude.value !== payload.value + payloadSize.value ||
+      preludeSize.value < preludePrefix.length ||
+      actual <
+        offset + Math.max(...positions.map((field) => field.offset - offset + field.width)) + payloadSize.value ||
+      actual + preludeSize.value > offset + size ||
+      (binary.indexOf(preludePrefix, actual + preludePrefix.length) >= 0 &&
+        binary.indexOf(preludePrefix, actual + preludePrefix.length) < offset + size)
+    )
+      throw new Error('Invalid signed pkg payload/prelude layout');
+    if (prelude.value !== actual) {
+      patches.push({ ...payload, value: actual - payloadSize.value }, { ...prelude, value: actual });
+    }
+  }
+  for (const patch of patches) {
+    if (String(patch.value).length > patch.width) throw new Error('Signed pkg position exceeds its reserved space');
+  }
+  for (const patch of patches) binary.write(String(patch.value).padEnd(patch.width, ' '), patch.offset, 'ascii');
+  return patches.length > 0;
+}

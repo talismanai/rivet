@@ -6,11 +6,13 @@ import { tmpdir, platform } from 'node:os';
 import type { Readable, Writable } from 'node:stream';
 import {
   parseHttpAuthenticationToken,
-  isHttpAuthenticationToken,
-  type HttpAuthenticationToken,
   type HttpAuthenticationRequest,
   type HttpAuthenticationResult,
+  type HttpAuthenticationProgress,
 } from '@ironclad/rivet-core';
+
+import { ChromeHeaderCapture } from './ChromeHeaderCapture.js';
+export { bearerTokenFromHeaders } from './ChromeHeaderCapture.js';
 
 const oauthErrors = {
   browser: 'Could not launch Chrome/Chromium.',
@@ -52,6 +54,7 @@ export class ChromeDebuggingPipe {
   private buffer = '';
   private readonly pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void }>();
   onEvent: (message: Message) => void = () => {};
+  onClose: () => void = () => {};
   private readonly read = (chunk: string) => {
     this.buffer += chunk;
     if (this.buffer.length > 4 * 1024 * 1024) {
@@ -110,6 +113,7 @@ export class ChromeDebuggingPipe {
     this.input.off('data', this.read);
     for (const pending of this.pending.values()) pending.reject(new OAuthAuthenticationError('connection'));
     this.pending.clear();
+    this.onClose();
   }
 }
 
@@ -124,27 +128,6 @@ export function matchesOAuthCallback(actual: string, expected: string): boolean 
     );
   } catch {
     return false;
-  }
-}
-
-/** Inspect only request headers; JWT signature validation remains the destination API's responsibility. */
-export function bearerTokenFromHeaders(headers: Record<string, unknown>): HttpAuthenticationToken | undefined {
-  const authorization = Object.entries(headers).find(([key]) => key.toLowerCase() === 'authorization')?.[1];
-  if (typeof authorization !== 'string') return undefined;
-  const accessToken = /^Bearer\s+(\S+)\s*$/i.exec(authorization)?.[1];
-  if (!accessToken || accessToken.split('.').length !== 3 || !isHttpAuthenticationToken({ accessToken }))
-    return undefined;
-  try {
-    const claims = JSON.parse(Buffer.from(accessToken.split('.')[1]!, 'base64url').toString('utf8'));
-    if (!claims || typeof claims !== 'object') return undefined;
-    if (claims.exp !== undefined) {
-      if (typeof claims.exp !== 'number' || !Number.isFinite(claims.exp)) return undefined;
-      const expiresIn = Math.floor(claims.exp - Date.now() / 1000);
-      return expiresIn > 0 ? { accessToken, expiresIn } : undefined;
-    }
-    return { accessToken };
-  } catch {
-    return undefined;
   }
 }
 
@@ -203,18 +186,24 @@ async function waitForExit(child: ChildProcess): Promise<void> {
   });
 }
 
-/** Launch an isolated browser and capture a callback JSON token or a Bearer header sent to the exact API origin. */
+/** Capture callback JSON or discover the Bearer JWT used by the configured login page. */
 export async function authenticateInChrome(
   request: HttpAuthenticationRequest,
   signal: AbortSignal,
-  options: { onCallbackError?: (error: OAuthAuthenticationError) => void } = {},
+  options: {
+    onCallbackError?: (error: OAuthAuthenticationError) => void;
+    onProgress?: (progress: HttpAuthenticationProgress) => void;
+  } = {},
 ): Promise<HttpAuthenticationResult> {
   signal.throwIfAborted();
   const login = webUrl(request.authenticationUrl);
   const callbackUrl = request.callbackUrl || login.searchParams.get('redirect_uri');
   const headerCapture = request.tokenSource === 'authorization-header' || (!request.tokenSource && !callbackUrl);
   const callback = headerCapture ? undefined : webUrl(callbackUrl || '');
-  const apiOrigin = webUrl(request.requestUrl).origin;
+  webUrl(request.requestUrl);
+  // Trust the page initiating the request, rather than a separately configured API hostname.
+  // This excludes Google/provider frames while allowing the platform to change its API endpoints.
+  const pageOrigins = new Set([login.origin, ...(callbackUrl ? [webUrl(callbackUrl).origin] : [])]);
   const executable = await findChrome();
   signal.throwIfAborted();
   const profile = await mkdtemp(join(tmpdir(), 'rivet-oauth-'));
@@ -246,10 +235,34 @@ export async function authenticateInChrome(
     const cdp = pipe;
     let frameId: string | undefined;
     let loginTargetId: string | undefined;
-    const apiRequests = new Set<string>();
-    const successfulRequests = new Set<string>();
-    const headerTokens = new Map<string, HttpAuthenticationToken>();
+    let lastProgress = '';
+    const report = (progress: HttpAuthenticationProgress) => {
+      const serialized = JSON.stringify(progress);
+      if (serialized === lastProgress) return;
+      lastProgress = serialized;
+      options.onProgress?.(progress);
+    };
+    const headerCaptureState = new ChromeHeaderCapture(pageOrigins, report);
+    const captureSessions = new Map<string, { targetId: string; type: string }>();
+    const autoAttach = {
+      autoAttach: true,
+      waitForDebuggerOnStart: true,
+      flatten: true,
+      filter: [
+        ...['page', 'iframe', 'worker', 'service_worker', 'shared_worker'].map((type) => ({
+          type,
+          exclude: false,
+        })),
+        { exclude: true },
+      ],
+    };
+    const enableCapture = async (id: string) => {
+      await cdp.command('Network.enable', {}, id);
+      // Workers can spawn further workers; attach recursively before resuming their JavaScript.
+      await cdp.command('Target.setAutoAttach', autoAttach, id);
+    };
     const completion = new Promise<HttpAuthenticationResult>((resolve, reject) => {
+      cdp.onClose = () => reject(new OAuthAuthenticationError('connection'));
       abort = () => reject(new Error('OAuth authentication aborted'));
       signal.addEventListener('abort', abort, { once: true });
       if (signal.aborted) abort();
@@ -257,66 +270,52 @@ export async function authenticateInChrome(
       child!.once('error', () => reject(new OAuthAuthenticationError('browser')));
       child!.once('exit', () => resolve(false));
       cdp.onEvent = (message) => {
+        if (headerCapture && message.method === 'Target.attachedToTarget') {
+          const { sessionId: id, targetInfo } = message.params ?? {};
+          if (typeof id !== 'string' || !targetInfo?.targetId) return;
+          captureSessions.set(id, { targetId: targetInfo.targetId, type: targetInfo.type });
+          headerCaptureState.registerSession(id, message.sessionId);
+          void enableCapture(id)
+            .catch(() => report({ stage: 'capture-error' }))
+            .finally(() => {
+              // Always resume a target, including unsupported/detached worker domains.
+              void cdp.command('Runtime.runIfWaitingForDebugger', {}, id).catch(() => {});
+            });
+          return;
+        }
         if (
-          (message.method === 'Target.targetDestroyed' && message.params?.targetId === loginTargetId) ||
-          (message.method === 'Target.detachedFromTarget' && message.params?.sessionId === sessionId)
+          headerCapture &&
+          (message.method === 'Target.targetDestroyed' || message.method === 'Target.detachedFromTarget')
+        ) {
+          let pageRemoved = false;
+          for (const [id, target] of captureSessions) {
+            if (target.targetId === message.params?.targetId || id === message.params?.sessionId) {
+              pageRemoved ||= target.type === 'page';
+              captureSessions.delete(id);
+              headerCaptureState.forgetSession(id);
+            }
+          }
+          if (pageRemoved && ![...captureSessions.values()].some((target) => target.type === 'page')) {
+            loginWindowClosed = true;
+            resolve(false);
+          }
+          return;
+        }
+        if (
+          !headerCapture &&
+          ((message.method === 'Target.targetDestroyed' && message.params?.targetId === loginTargetId) ||
+            (message.method === 'Target.detachedFromTarget' && message.params?.sessionId === sessionId))
         ) {
           loginWindowClosed = true;
           diagnosticClosed?.();
           resolve(false);
           return;
         }
-        if (message.sessionId !== sessionId) return;
+        if (headerCapture ? !captureSessions.has(message.sessionId ?? '') : message.sessionId !== sessionId) return;
         const params = message.params;
         if (headerCapture) {
-          const accept = (id: string) => {
-            const token = headerTokens.get(id);
-            if (token && apiRequests.has(id) && successfulRequests.has(id)) resolve(token);
-          };
-          if (message.method === 'Network.requestWillBeSent') {
-            try {
-              if (new URL(params.request.url).origin === apiOrigin) {
-                apiRequests.add(params.requestId);
-                const token = bearerTokenFromHeaders(params.request.headers ?? {});
-                if (token) headerTokens.set(params.requestId, token);
-                accept(params.requestId);
-              } else {
-                apiRequests.delete(params.requestId);
-                successfulRequests.delete(params.requestId);
-                headerTokens.delete(params.requestId);
-              }
-            } catch {
-              /* ignore non-web requests */
-            }
-          }
-          if (message.method === 'Network.requestWillBeSentExtraInfo') {
-            const token = bearerTokenFromHeaders(params.headers ?? {});
-            if (token) headerTokens.set(params.requestId, token);
-            accept(params.requestId);
-          }
-          if (message.method === 'Network.responseReceived') {
-            try {
-              if (
-                new URL(params.response.url).origin === apiOrigin &&
-                params.response.status >= 200 &&
-                params.response.status < 300
-              ) {
-                successfulRequests.add(params.requestId);
-                accept(params.requestId);
-              }
-            } catch {
-              /* ignore non-web responses */
-            }
-          }
-          if (message.method === 'Network.loadingFailed') {
-            apiRequests.delete(params.requestId);
-            successfulRequests.delete(params.requestId);
-            headerTokens.delete(params.requestId);
-          }
-          // Bound metadata collected during long interactive logins.
-          if (headerTokens.size > 512) headerTokens.delete(headerTokens.keys().next().value!);
-          if (apiRequests.size > 512) apiRequests.delete(apiRequests.values().next().value!);
-          if (successfulRequests.size > 512) successfulRequests.delete(successfulRequests.values().next().value!);
+          const token = headerCaptureState.capture(message.sessionId!, message.method ?? '', params ?? {});
+          if (token) resolve(token);
           return;
         }
         if (message.method === 'Page.frameNavigated' && !params.frame?.parentId) {
@@ -403,7 +402,10 @@ export async function authenticateInChrome(
         }
       }
       if (headerCapture) {
-        await cdp.command('Network.enable', {}, sessionId);
+        captureSessions.set(sessionId!, { targetId, type: 'page' });
+        await enableCapture(sessionId!);
+        await cdp.command('Target.setAutoAttach', autoAttach);
+        report({ stage: 'waiting' });
       } else {
         await cdp.command(
           'Fetch.enable',

@@ -17,6 +17,7 @@ import { TauriNativeApi } from '../model/native/TauriNativeApi';
 import { requestHttpAuthentication } from '../utils/httpAuthentication';
 import { desktopHttpRequest } from '../utils/desktopHttpRequest';
 import { httpAuthenticationSessionsState } from '../state/httpAuthentication';
+import { useHttpAuthenticationContext } from './useHttpAuthenticationContext';
 import { useStableCallback } from './useStableCallback';
 import { useSaveCurrentGraph } from './useSaveCurrentGraph';
 import { useCurrentExecution } from './useCurrentExecution';
@@ -52,6 +53,7 @@ export function useLocalExecutor() {
   const lastRunData = useAtomValue(lastRunDataByNodeState);
   const loadedProject = useAtomValue(loadedProjectState);
   const authenticationSessions = useAtomValue(httpAuthenticationSessionsState);
+  const publishAuthenticationToken = useHttpAuthenticationContext();
 
   function attachGraphEvents(processor: GraphProcessor) {
     processor.on('nodeStart', currentExecution.onNodeStart);
@@ -166,6 +168,8 @@ export function useLocalExecutor() {
                     requestHttpAuthentication,
                     httpRequest: desktopHttpRequest,
                     httpAuthenticationCache: authenticationSessions.forProject(project.metadata.id),
+                    onHttpAuthenticationToken: (key, token) =>
+                      publishAuthenticationToken(project.metadata.id, key, token),
                   }
                 : {}),
               datasetProvider,
@@ -237,6 +241,8 @@ export function useLocalExecutor() {
                       requestHttpAuthentication,
                       httpRequest: desktopHttpRequest,
                       httpAuthenticationCache: authenticationSessions.forProject(project.metadata.id),
+                      onHttpAuthenticationToken: (key, token) =>
+                        publishAuthenticationToken(project.metadata.id, key, token),
                     }
                   : {}),
                 datasetProvider,

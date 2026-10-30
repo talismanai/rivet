@@ -1,16 +1,19 @@
 import { useLatest } from 'ahooks';
-import { useAtomValue, useAtom } from 'jotai';
+import { useAtomValue, useAtom, useStore } from 'jotai';
 import { remoteDebuggerState, selectedExecutorState } from '../state/execution.js';
 import { useEffect, useRef, useState } from 'react';
 import { set } from 'lodash-es';
 import { match } from 'ts-pattern';
 import { datasetProvider } from '../utils/globals';
-import { type HttpAuthenticationRequest } from '@ironclad/rivet-core';
+import { type HttpAuthenticationRequest, type HttpAuthenticationToken, type ProjectId } from '@ironclad/rivet-core';
 import { toast } from 'react-toastify';
 import { requestHttpAuthentication } from '../utils/httpAuthentication';
 import { RemoteHttpAuthentication } from '../utils/remoteHttpAuthentication';
 import { isInTauri } from '../utils/tauri';
 import { openedProjectsSortedIdsState, projectState } from '../state/savedGraphs';
+import { useHttpAuthenticationContext } from './useHttpAuthenticationContext';
+import { httpAuthenticationSessionsState } from '../state/httpAuthentication';
+import { syncHttpAuthenticationSessions } from '../utils/syncHttpAuthenticationSessions';
 
 let currentDebuggerMessageHandler: ((message: string, data: unknown) => void) | null = null;
 
@@ -25,6 +28,8 @@ export function useRemoteDebugger(options: { onConnect?: () => void; onDisconnec
   const [remoteDebugger, setRemoteDebuggerState] = useAtom(remoteDebuggerState);
   const openProjectIds = useAtomValue(openedProjectsSortedIdsState);
   const currentProject = useAtomValue(projectState);
+  const publishAuthenticationToken = useHttpAuthenticationContext();
+  const store = useStore();
 
   useEffect(() => {
     const socket = remoteDebugger.socket;
@@ -116,12 +121,25 @@ export function useRemoteDebugger(options: { onConnect?: () => void; onDisconnec
       const { message, data } = JSON.parse(event.data);
 
       if (message === 'http-authentication-supported') {
-        if (isInTauri()) socket.send(JSON.stringify({ type: 'http-authentication-supported', data: {} }));
+        if (isInTauri()) {
+          socket.send(JSON.stringify({ type: 'http-authentication-supported', data: {} }));
+          syncHttpAuthenticationSessions(socket, store.get(httpAuthenticationSessionsState), [
+            ...store.get(openedProjectsSortedIdsState),
+            store.get(projectState).metadata.id,
+          ]);
+        }
       } else if (message === 'http-authentication') {
         const { requestId, request } = data as { requestId: string; request: HttpAuthenticationRequest };
         void authentication.start(requestId, request);
       } else if (message === 'http-authentication-cancel') {
         authentication.cancel((data as { requestId: string }).requestId);
+      } else if (message === 'http-authentication-token') {
+        const { projectId, contextKey, token } = data as {
+          projectId: ProjectId;
+          contextKey: string;
+          token: HttpAuthenticationToken;
+        };
+        publishAuthenticationToken(projectId, contextKey, token);
       } else if (message === 'graph-upload-allowed') {
         console.log('Graph uploading is allowed.');
         setRemoteDebuggerState((prevState) => ({

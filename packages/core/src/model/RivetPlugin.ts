@@ -16,6 +16,15 @@ export type RivetPlugin = {
 
   configPage?: RivetPluginConfigPage;
 
+  /** Settings fields used by the desktop's interactive Sign in action. */
+  httpAuthentication?: {
+    requestUrlConfigKey: string;
+    loginUrlConfigKey: string;
+    authorizationConfigKey?: string;
+    tokenContextKeyConfigKey?: string;
+    tokenSource?: 'callback' | 'authorization-header';
+  };
+
   /** Defines additional context menu groups that the plugin adds. */
   contextMenuGroups?: Array<{
     id: string;

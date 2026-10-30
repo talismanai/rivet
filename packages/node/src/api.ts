@@ -98,6 +98,15 @@ export function createProcessor(
             options.httpAuthenticationCache ??
             options.remoteDebugger?.getHttpAuthenticationCache?.(processor.processor, project.metadata.id),
           httpRequest: options.httpRequest,
+          onHttpAuthenticationToken: (contextKey, token) => {
+            options.onHttpAuthenticationToken?.(contextKey, token);
+            options.remoteDebugger?.publishHttpAuthenticationToken?.(
+              processor.processor,
+              project.metadata.id,
+              contextKey,
+              token,
+            );
+          },
         },
         processor.inputs,
         processor.contextValues,

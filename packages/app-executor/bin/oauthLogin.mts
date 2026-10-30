@@ -24,12 +24,14 @@ export function runOAuthLogin(): void {
     }
     let message: HttpAuthenticationRequest | { cancel: true };
     try {
-      message = JSON.parse(line);
+      const parsed: unknown = JSON.parse(line);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Invalid configuration');
+      message = parsed as typeof message;
     } catch {
       finish({ error: 'Invalid OAuth configuration' });
       return;
     }
-    if (message && 'cancel' in message) {
+    if ('cancel' in message && message.cancel === true) {
       cancel();
       if (!started) finish({ result: false });
       return;
@@ -37,6 +39,9 @@ export function runOAuthLogin(): void {
     if (started) return;
     started = true;
     void authenticateInChrome(message as HttpAuthenticationRequest, controller.signal, {
+      onProgress(progress) {
+        process.stdout.write(JSON.stringify({ progress }) + '\n');
+      },
       onCallbackError(error) {
         diagnosticReported = true;
         process.stdout.write(
