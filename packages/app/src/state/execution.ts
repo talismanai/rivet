@@ -3,6 +3,7 @@ import { atomWithStorage } from 'jotai/utils';
 import { type ExecutionRecorder } from '@ironclad/rivet-core';
 import { defaultExecutorState } from './settings';
 import { createHybridStorage } from './storage.js';
+import { createRemoteDebuggerStorage } from '../utils/remoteDebuggerStorage';
 
 const { storage } = createHybridStorage('execution');
 
@@ -32,7 +33,7 @@ export const remoteDebuggerState = atomWithStorage<RemoteDebuggerState>(
     remoteUploadAllowed: false,
     isInternalExecutor: false,
   },
-  storage,
+  createRemoteDebuggerStorage(storage),
 );
 
 export const loadedRecordingState = atom<{

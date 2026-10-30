@@ -28,7 +28,7 @@ export function useRemoteDebugger(options: { onConnect?: () => void; onDisconnec
 
   useEffect(() => {
     const socket = remoteDebugger.socket;
-    if (!socket) return;
+    if (!socket || typeof socket.addEventListener !== 'function') return;
     const notify = () => {
       if (socket.readyState === WebSocket.OPEN && isInTauri()) {
         socket.send(
