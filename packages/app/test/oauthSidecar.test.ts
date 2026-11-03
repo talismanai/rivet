@@ -122,9 +122,9 @@ it('reports capture progress without completing sign-in or exposing arbitrary he
   await Promise.resolve();
   assert.equal(settled, false);
   assert.equal(progress.length, 3);
-  assert.match(progress[0]!, /Waiting.*https:\/\/auth.example.com/);
+  assert.match(progress[0]!, /Waiting.*first Bearer JWT.*any request/);
   assert.match(progress[1]!, /Bearer JWT detected; HTTP 200/);
-  assert.match(progress[2]!, /not a valid, unexpired Bearer JWT; waiting for response/);
+  assert.match(progress[2]!, /not a valid, unexpired Bearer JWT/);
   assert.ok(!JSON.stringify(progress).includes('secret'));
   stdout.emit('data', '{"result":false}');
   assert.equal(await pending, false);

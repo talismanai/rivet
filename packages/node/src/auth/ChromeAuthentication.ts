@@ -186,7 +186,7 @@ async function waitForExit(child: ChildProcess): Promise<void> {
   });
 }
 
-/** Capture callback JSON or discover the Bearer JWT used by the configured login page. */
+/** Capture callback JSON or the first Bearer JWT observed in the dedicated login browser. */
 export async function authenticateInChrome(
   request: HttpAuthenticationRequest,
   signal: AbortSignal,
@@ -201,9 +201,6 @@ export async function authenticateInChrome(
   const headerCapture = request.tokenSource === 'authorization-header' || (!request.tokenSource && !callbackUrl);
   const callback = headerCapture ? undefined : webUrl(callbackUrl || '');
   webUrl(request.requestUrl);
-  // Trust the page initiating the request, rather than a separately configured API hostname.
-  // This excludes Google/provider frames while allowing the platform to change its API endpoints.
-  const pageOrigins = new Set([login.origin, ...(callbackUrl ? [webUrl(callbackUrl).origin] : [])]);
   const executable = await findChrome();
   signal.throwIfAborted();
   const profile = await mkdtemp(join(tmpdir(), 'rivet-oauth-'));
@@ -242,7 +239,7 @@ export async function authenticateInChrome(
       lastProgress = serialized;
       options.onProgress?.(progress);
     };
-    const headerCaptureState = new ChromeHeaderCapture(pageOrigins, report);
+    const headerCaptureState = new ChromeHeaderCapture(report);
     const captureSessions = new Map<string, { targetId: string; type: string }>();
     const autoAttach = {
       autoAttach: true,
@@ -274,7 +271,6 @@ export async function authenticateInChrome(
           const { sessionId: id, targetInfo } = message.params ?? {};
           if (typeof id !== 'string' || !targetInfo?.targetId) return;
           captureSessions.set(id, { targetId: targetInfo.targetId, type: targetInfo.type });
-          headerCaptureState.registerSession(id, message.sessionId);
           void enableCapture(id)
             .catch(() => report({ stage: 'capture-error' }))
             .finally(() => {
@@ -292,7 +288,6 @@ export async function authenticateInChrome(
             if (target.targetId === message.params?.targetId || id === message.params?.sessionId) {
               pageRemoved ||= target.type === 'page';
               captureSessions.delete(id);
-              headerCaptureState.forgetSession(id);
             }
           }
           if (pageRemoved && ![...captureSessions.values()].some((target) => target.type === 'page')) {
@@ -314,7 +309,7 @@ export async function authenticateInChrome(
         if (headerCapture ? !captureSessions.has(message.sessionId ?? '') : message.sessionId !== sessionId) return;
         const params = message.params;
         if (headerCapture) {
-          const token = headerCaptureState.capture(message.sessionId!, message.method ?? '', params ?? {});
+          const token = headerCaptureState.capture(message.method ?? '', params ?? {});
           if (token) resolve(token);
           return;
         }

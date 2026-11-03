@@ -248,16 +248,16 @@ void describe('Official login Authorization header capture', () => {
   for (const fixture of [
     { name: 'made by login page workers', worker: true, cors: true, redirect: false },
     { name: 'whose successful responses are blocked by CORS', worker: false, cors: false, redirect: false },
-    { name: 'after ignoring a JWT stripped by a cross-origin redirect', worker: false, cors: true, redirect: true },
+    { name: 'from the first request before a cross-origin redirect', worker: false, cors: true, redirect: true },
   ]) {
     void it(
       `captures authorized requests ${fixture.name}`,
       { skip: process.env.RIVET_TEST_CHROME !== '1', timeout: 30000 },
       async () => {
         const token = jwt({ exp: Math.floor(Date.now() / 1000) + 3600, source: 'worker' });
+        const redirected = jwt({ exp: Math.floor(Date.now() / 1000) + 3600, source: 'first-before-redirect' });
         let login = '';
         let capture = '';
-        let verified = false;
         const server = createServer((request, response) => {
           if (fixture.cors || request.method === 'OPTIONS') response.setHeader('Access-Control-Allow-Origin', login);
           response.setHeader('Access-Control-Allow-Headers', 'Authorization');
@@ -272,7 +272,7 @@ void describe('Official login Authorization header capture', () => {
               fixture.worker
                 ? '<script>new Worker("/auth-worker.js")</script>'
                 : `<script>(async()=>{
-                    ${fixture.redirect ? `await fetch('/redirect',{headers:{Authorization:${JSON.stringify('Bearer ' + jwt({ source: 'stripped', exp: Math.floor(Date.now() / 1000) + 3600 }))}}});` : ''}
+                    ${fixture.redirect ? `await fetch('/redirect',{headers:{Authorization:${JSON.stringify('Bearer ' + redirected)}}});` : ''}
                     await fetch(${JSON.stringify(capture + '/verified')},{headers:{Authorization:${JSON.stringify('Bearer ' + token)}}});
                   })()</script>`,
             );
@@ -285,8 +285,6 @@ void describe('Official login Authorization header capture', () => {
               `fetch(${JSON.stringify(capture + '/verified')},{headers:{Authorization:${JSON.stringify('Bearer ' + token)}}});`,
             );
           } else {
-            if (request.url === '/public') assert.equal(request.headers.authorization, undefined);
-            verified ||= request.url === '/verified';
             response.writeHead(200, { 'content-type': 'application/json' });
             response.end('{}');
           }
@@ -312,26 +310,20 @@ void describe('Official login Authorization header capture', () => {
           ).catch((error: Error) => {
             throw new Error(`${error.message}; capture progress: ${JSON.stringify(progress)}`);
           });
-          assert.ok(verified);
           assert.ok(result);
-          assert.equal(result.accessToken, token);
-          assert.ok(
-            progress.some(
-              (event: any) => event.stage === 'request' && event.authorization === 'valid' && event.status === 200,
-            ),
-          );
+          assert.equal(result.accessToken, fixture.redirect ? redirected : token);
+          assert.ok(progress.some((event: any) => event.stage === 'request' && event.authorization === 'valid'));
           assert.ok(!JSON.stringify(progress).includes(token));
         } finally {
           clearTimeout(timeout);
           controller.abort();
           await new Promise<void>((resolve) => server.close(() => resolve()));
-          assert.ok(verified, 'the browser actually sent the authorized request');
         }
       },
     );
   }
   void it(
-    'discovers the API origin and ignores JWTs sent by unrelated provider frames',
+    'captures the first JWT from a different page origin and API host',
     { skip: process.env.RIVET_TEST_CHROME !== '1', timeout: 30000 },
     async () => {
       const token = jwt({ exp: Math.floor(Date.now() / 1000) + 3600, source: 'capture' });
@@ -381,10 +373,64 @@ void describe('Official login Authorization header capture', () => {
           controller.signal,
         );
         assert.ok(result);
+        assert.equal(result.accessToken, unrelated);
+      } finally {
+        clearTimeout(timeout);
+        controller.abort();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    },
+  );
+  void it(
+    'captures after navigation changes the page origin without waiting for an HTTP response',
+    { skip: process.env.RIVET_TEST_CHROME !== '1', timeout: 30000 },
+    async () => {
+      const token = jwt({ exp: Math.floor(Date.now() / 1000) + 3600, source: 'new-page-origin' });
+      let login = '';
+      let landing = '';
+      const server = createServer((request, response) => {
+        response.setHeader('Access-Control-Allow-Origin', landing);
+        response.setHeader('Access-Control-Allow-Headers', 'Authorization');
+        if (request.method === 'OPTIONS') {
+          response.writeHead(204);
+          response.end();
+        } else if (request.url === '/login') {
+          response.writeHead(302, { location: landing + '/home' });
+          response.end();
+        } else if (request.url === '/home') {
+          response.writeHead(200, { 'content-type': 'text/html' });
+          response.end(
+            `<script>fetch(${JSON.stringify(login + '/first-jwt')},{headers:{Authorization:${JSON.stringify('Bearer ' + token)}}})</script>`,
+          );
+        } else if (request.url !== '/first-jwt') {
+          response.writeHead(204);
+          response.end();
+        }
+        // Deliberately never send an HTTP response for /first-jwt.
+      });
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const address = server.address();
+      assert.ok(address && typeof address === 'object');
+      login = `http://127.0.0.1:${address.port}`;
+      landing = `http://localhost:${address.port}`;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+      try {
+        const result = await authenticateInChrome(
+          {
+            authenticationUrl: login + '/login',
+            requestUrl: 'https://unrelated-api.example.invalid/private',
+            tokenSource: 'authorization-header',
+            status: 0,
+          },
+          controller.signal,
+        );
+        assert.ok(result);
         assert.equal(result.accessToken, token);
       } finally {
         clearTimeout(timeout);
         controller.abort();
+        server.closeAllConnections();
         await new Promise<void>((resolve) => server.close(() => resolve()));
       }
     },
@@ -407,7 +453,7 @@ void describe('Official login Authorization header capture', () => {
     }
   });
   void it(
-    'captures only a valid JWT accepted by a login-page API request',
+    'captures the first JWT without waiting for API acceptance',
     { skip: process.env.RIVET_TEST_CHROME !== '1', timeout: 30000 },
     async () => {
       const token = jwt({ token_use: 'id', aud: 'admin-client', exp: Math.floor(Date.now() / 1000) + 3600 });
@@ -415,7 +461,6 @@ void describe('Official login Authorization header capture', () => {
       const unrelated = 'opaque-session-token';
       let base = '';
       let api = '';
-      const seen: string[] = [];
       const server = createServer((request, response) => {
         response.setHeader('Access-Control-Allow-Origin', base);
         response.setHeader('Access-Control-Allow-Headers', 'Authorization');
@@ -432,7 +477,6 @@ void describe('Official login Authorization header capture', () => {
           await fetch(${JSON.stringify(api + '/verified')}, {headers:{Authorization:${JSON.stringify('Bearer ' + token)}}});
         })()</script>`);
         } else {
-          seen.push(request.url!);
           response.writeHead(request.url === '/rejected' ? 401 : 200, { 'content-type': 'application/json' });
           response.end('{}');
         }
@@ -456,8 +500,7 @@ void describe('Official login Authorization header capture', () => {
           controller.signal,
         );
         assert.ok(result);
-        assert.equal(result.accessToken, token);
-        assert.ok(seen.includes('/rejected') && seen.includes('/unrelated') && seen.includes('/verified'));
+        assert.equal(result.accessToken, rejected);
       } finally {
         clearTimeout(timeout);
         await new Promise<void>((resolve) => server.close(() => resolve()));

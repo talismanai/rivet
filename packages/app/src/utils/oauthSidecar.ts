@@ -51,9 +51,7 @@ export function runOAuthSidecar(
         if ('progress' in message) {
           const progress = message.progress as Partial<HttpAuthenticationProgress> | null;
           if (progress?.stage === 'waiting') {
-            onProgress?.(
-              `Waiting for a Bearer JWT in requests initiated by ${new URL(request.authenticationUrl).origin}.`,
-            );
+            onProgress?.('Waiting for the first Bearer JWT in any request from the login Chrome session.');
           } else if (progress?.stage === 'capture-error') {
             onProgress?.('Chrome could not enable network capture for a browser target.');
           } else if (
@@ -71,8 +69,8 @@ export function runOAuthSidecar(
               progress.status >= 100 &&
               progress.status <= 599
                 ? `HTTP ${progress.status}`
-                : 'waiting for response';
-            onProgress?.(`Login-page request: ${header}; ${status}.`);
+                : undefined;
+            onProgress?.(`Browser request: ${header}${status ? `; ${status}` : ''}.`);
           }
           return;
         }
