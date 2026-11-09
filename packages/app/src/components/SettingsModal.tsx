@@ -33,6 +33,7 @@ import { DEFAULT_CHAT_NODE_TIMEOUT } from '../../../core/src/utils/defaults';
 import useAsyncEffect from 'use-async-effect';
 import { getVersion } from '@tauri-apps/api/app';
 import { swallowPromise } from '../utils/syncWrapper';
+import { PluginOAuthSignIn } from './PluginOAuthSignIn';
 
 interface SettingsModalProps {}
 
@@ -548,6 +549,9 @@ export const PluginsSettingsPage: FC = () => {
                             }
                           />
                           {config.helperText && <HelperMessage>{config.helperText}</HelperMessage>}
+                          {key === plugin.httpAuthentication?.loginUrlConfigKey && (
+                            <PluginOAuthSignIn plugin={plugin} />
+                          )}
                         </>
                       ),
                     )
@@ -608,6 +612,7 @@ export const CustomPluginsSettingsPage: FC<{ pluginId: string }> = ({ pluginId }
                         }
                       />
                       {config.helperText && <HelperMessage>{config.helperText}</HelperMessage>}
+                      {key === plugin.httpAuthentication?.loginUrlConfigKey && <PluginOAuthSignIn plugin={plugin} />}
                     </>
                   ),
                 )

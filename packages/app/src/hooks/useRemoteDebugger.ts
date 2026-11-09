@@ -1,10 +1,19 @@
 import { useLatest } from 'ahooks';
-import { useAtomValue, useAtom } from 'jotai';
+import { useAtomValue, useAtom, useStore } from 'jotai';
 import { remoteDebuggerState, selectedExecutorState } from '../state/execution.js';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { set } from 'lodash-es';
 import { match } from 'ts-pattern';
 import { datasetProvider } from '../utils/globals';
+import { type HttpAuthenticationRequest, type HttpAuthenticationToken, type ProjectId } from '@ironclad/rivet-core';
+import { toast } from 'react-toastify';
+import { requestHttpAuthentication } from '../utils/httpAuthentication';
+import { RemoteHttpAuthentication } from '../utils/remoteHttpAuthentication';
+import { isInTauri } from '../utils/tauri';
+import { openedProjectsSortedIdsState, projectState } from '../state/savedGraphs';
+import { useHttpAuthenticationContext } from './useHttpAuthenticationContext';
+import { httpAuthenticationSessionsState } from '../state/httpAuthentication';
+import { syncHttpAuthenticationSessions } from '../utils/syncHttpAuthenticationSessions';
 
 let currentDebuggerMessageHandler: ((message: string, data: unknown) => void) | null = null;
 
@@ -17,6 +26,28 @@ let manuallyDisconnecting = false;
 
 export function useRemoteDebugger(options: { onConnect?: () => void; onDisconnect?: () => void } = {}) {
   const [remoteDebugger, setRemoteDebuggerState] = useAtom(remoteDebuggerState);
+  const openProjectIds = useAtomValue(openedProjectsSortedIdsState);
+  const currentProject = useAtomValue(projectState);
+  const publishAuthenticationToken = useHttpAuthenticationContext();
+  const store = useStore();
+
+  useEffect(() => {
+    const socket = remoteDebugger.socket;
+    if (!socket || typeof socket.addEventListener !== 'function') return;
+    const notify = () => {
+      if (socket.readyState === WebSocket.OPEN && isInTauri()) {
+        socket.send(
+          JSON.stringify({
+            type: 'http-authentication-projects',
+            data: { projectIds: [...new Set([...openProjectIds, currentProject.metadata.id])] },
+          }),
+        );
+      }
+    };
+    notify();
+    socket.addEventListener('open', notify);
+    return () => socket.removeEventListener('open', notify);
+  }, [remoteDebugger.socket, openProjectIds, currentProject.metadata.id]);
   const onConnectLatest = useLatest(options.onConnect ?? (() => {}));
   const onDisconnectLatest = useLatest(options.onDisconnect ?? (() => {}));
   const [retryDelay, setRetryDelay] = useState(0);
@@ -29,6 +60,20 @@ export function useRemoteDebugger(options: { onConnect?: () => void; onDisconnec
       url = `ws://localhost:21888`;
     }
     const socket = new WebSocket(url);
+    const authentication = new RemoteHttpAuthentication(
+      (request, signal) => {
+        toast.info(
+          'Complete Google sign-in in the dedicated Chrome window. Rivet will capture your platform token and resume the request.',
+        );
+        return requestHttpAuthentication(request, signal);
+      },
+      (requestId, result) => {
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ type: 'http-authentication-response', data: { requestId, result } }));
+        }
+      },
+      (error) => toast.error(String(error)),
+    );
     onConnectLatest.current?.();
 
     setRemoteDebuggerState((prevState) => ({
@@ -48,6 +93,7 @@ export function useRemoteDebugger(options: { onConnect?: () => void; onDisconnec
     };
 
     socket.onclose = () => {
+      authentication.dispose();
       if (manuallyDisconnecting) {
         setRemoteDebuggerState((prevState) => ({
           ...prevState,
@@ -74,7 +120,27 @@ export function useRemoteDebugger(options: { onConnect?: () => void; onDisconnec
     socket.onmessage = (event) => {
       const { message, data } = JSON.parse(event.data);
 
-      if (message === 'graph-upload-allowed') {
+      if (message === 'http-authentication-supported') {
+        if (isInTauri()) {
+          socket.send(JSON.stringify({ type: 'http-authentication-supported', data: {} }));
+          syncHttpAuthenticationSessions(socket, store.get(httpAuthenticationSessionsState), [
+            ...store.get(openedProjectsSortedIdsState),
+            store.get(projectState).metadata.id,
+          ]);
+        }
+      } else if (message === 'http-authentication') {
+        const { requestId, request } = data as { requestId: string; request: HttpAuthenticationRequest };
+        void authentication.start(requestId, request);
+      } else if (message === 'http-authentication-cancel') {
+        authentication.cancel((data as { requestId: string }).requestId);
+      } else if (message === 'http-authentication-token') {
+        const { projectId, contextKey, token } = data as {
+          projectId: ProjectId;
+          contextKey: string;
+          token: HttpAuthenticationToken;
+        };
+        publishAuthenticationToken(projectId, contextKey, token);
+      } else if (message === 'graph-upload-allowed') {
         console.log('Graph uploading is allowed.');
         setRemoteDebuggerState((prevState) => ({
           ...prevState,

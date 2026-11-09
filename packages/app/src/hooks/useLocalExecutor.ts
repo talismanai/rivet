@@ -14,6 +14,10 @@ import { produce } from 'immer';
 import { useRef } from 'react';
 import { toast } from 'react-toastify';
 import { TauriNativeApi } from '../model/native/TauriNativeApi';
+import { requestHttpAuthentication } from '../utils/httpAuthentication';
+import { desktopHttpRequest } from '../utils/desktopHttpRequest';
+import { httpAuthenticationSessionsState } from '../state/httpAuthentication';
+import { useHttpAuthenticationContext } from './useHttpAuthenticationContext';
 import { useStableCallback } from './useStableCallback';
 import { useSaveCurrentGraph } from './useSaveCurrentGraph';
 import { useCurrentExecution } from './useCurrentExecution';
@@ -22,7 +26,7 @@ import { loadedProjectState, projectContextState, projectDataState, projectState
 import { recordExecutionsState, settingsState } from '../state/settings';
 import { graphState } from '../state/graph';
 import { lastRecordingState, loadedRecordingState } from '../state/execution';
-import { fillMissingSettingsFromEnvironmentVariables } from '../utils/tauri';
+import { fillMissingSettingsFromEnvironmentVariables, isInTauri } from '../utils/tauri';
 import { trivetState } from '../state/trivet';
 import { runTrivet } from '@ironclad/trivet';
 import { audioProvider, datasetProvider } from '../utils/globals';
@@ -48,6 +52,8 @@ export function useLocalExecutor() {
   const projectContext = useAtomValue(projectContextState(project.metadata.id));
   const lastRunData = useAtomValue(lastRunDataByNodeState);
   const loadedProject = useAtomValue(loadedProjectState);
+  const authenticationSessions = useAtomValue(httpAuthenticationSessionsState);
+  const publishAuthenticationToken = useHttpAuthenticationContext();
 
   function attachGraphEvents(processor: GraphProcessor) {
     processor.on('nodeStart', currentExecution.onNodeStart);
@@ -157,6 +163,15 @@ export function useLocalExecutor() {
                 globalRivetNodeRegistry.getPlugins(),
               ),
               nativeApi: new TauriNativeApi(),
+              ...(isInTauri()
+                ? {
+                    requestHttpAuthentication,
+                    httpRequest: desktopHttpRequest,
+                    httpAuthenticationCache: authenticationSessions.forProject(project.metadata.id),
+                    onHttpAuthenticationToken: (key, token) =>
+                      publishAuthenticationToken(project.metadata.id, key, token),
+                  }
+                : {}),
               datasetProvider,
               audioProvider,
               projectPath: loadedProject.path ?? undefined,
@@ -221,6 +236,15 @@ export function useLocalExecutor() {
                   globalRivetNodeRegistry.getPlugins(),
                 ),
                 nativeApi: new TauriNativeApi(),
+                ...(isInTauri()
+                  ? {
+                      requestHttpAuthentication,
+                      httpRequest: desktopHttpRequest,
+                      httpAuthenticationCache: authenticationSessions.forProject(project.metadata.id),
+                      onHttpAuthenticationToken: (key, token) =>
+                        publishAuthenticationToken(project.metadata.id, key, token),
+                    }
+                  : {}),
                 datasetProvider,
                 audioProvider,
               },

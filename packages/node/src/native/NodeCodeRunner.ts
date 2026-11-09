@@ -20,7 +20,7 @@ export class NodeCodeRunner implements CodeRunner {
 
     if (options.includeRequire) {
       argNames.push('require');
-      const require = import.meta ? createRequire(import.meta.url) : module.require;
+      const require = createRequire(import.meta.url);
       args.push(require);
     }
 

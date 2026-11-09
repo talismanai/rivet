@@ -88,6 +88,25 @@ export function createProcessor(
             throttleChatNode: options.throttleChatNode ?? 100,
           } satisfies Required<Settings>,
           getChatNodeEndpoint: options.getChatNodeEndpoint,
+          requestHttpAuthentication:
+            options.requestHttpAuthentication ??
+            (options.remoteDebugger?.requestHttpAuthentication
+              ? (request, signal) =>
+                  options.remoteDebugger!.requestHttpAuthentication!(processor.processor, request, signal)
+              : undefined),
+          httpAuthenticationCache:
+            options.httpAuthenticationCache ??
+            options.remoteDebugger?.getHttpAuthenticationCache?.(processor.processor, project.metadata.id),
+          httpRequest: options.httpRequest,
+          onHttpAuthenticationToken: (contextKey, token) => {
+            options.onHttpAuthenticationToken?.(contextKey, token);
+            options.remoteDebugger?.publishHttpAuthenticationToken?.(
+              processor.processor,
+              project.metadata.id,
+              contextKey,
+              token,
+            );
+          },
         },
         processor.inputs,
         processor.contextValues,
